@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const AbsentRecord = require("../models/absent_records");
 
 
 // const stream = async (req, res) => {
@@ -160,38 +161,53 @@ const stream = async (req, res) => {
     res.status(500).json({ error: "Internal Server Error", data: err });
   }
 };
+
 const video_request = async (req, res) => {
-  const { absent_date, batch_name, student_id } = req.body;
-  if (!absent_date || !batch_name || !student_id) {
-    return res.status(400).json({ error: 'absent_date, batch_name, and student_id are required' });
-  }
+  try {
+    const { student_id, batch_name, absent_date } = req.body;
 
-  if (!Array.isArray(absent_date) || !absent_date.every(date => !isNaN(Date.parse(date)))) {
-    return res.status(400).json({ error: 'absent_date must be an array of valid date strings' });
-  }
+    if (!student_id || !batch_name || !absent_date) {
+      return res.status(400).json({ error: "Missing required fields." });
+    }
 
+    console.log("Checking for existing record with student_id:", student_id);
 
-  const currentDate = new Date();
-
-  const invalidDates = absent_date.filter(date => new Date(date) > currentDate);
-
-  if (invalidDates.length > 0) {
-    return res.status(400).json({
-      error: 'absent_date contains dates that are in the future',
-      invalidDates,
+    // Check if the student_id already exists
+    const existingRecord = await AbsentRecord.findOne({
+      where: { student_id },
     });
+
+   
+  } catch (error) {
+    console.error("Error:", error);
+    res.status(500).json({ error: "Failed to add or update absent record." });
   }
+};
 
-  const newRecord = {
-    student_id,
-    batch_name,
-    absent_date,
-  };
 
-  res.status(201).json({
-    message: 'Request submitted successfully',
-    record: newRecord,
-  });
+
+const video_request_approve = async (req, res) => {
+  try {
+    const { id, user_id } = req.params; 
+
+    // if 
+    const record = await AbsentRecord.findOne(id);
+
+    if (!record) {
+        return res.status(404).json({ message: "Record not found" });
+    }
+
+    record.approved_status = true;
+    await record.save();
+
+    return res.status(200).json({
+        message: "Approved status updated successfully",
+        record,
+    });
+} catch (error) {
+    console.error("Error updating approved status:", error);
+    return res.status(500).json({ message: "Internal server error", error });
 }
-module.exports = { stream, video_request };
+}
+module.exports = { stream, video_request, video_request_approve};
 
