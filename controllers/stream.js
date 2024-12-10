@@ -167,47 +167,69 @@ const video_request = async (req, res) => {
     const { student_id, batch_name, absent_date } = req.body;
 
     if (!student_id || !batch_name || !absent_date) {
-      return res.status(400).json({ error: "Missing required fields." });
+        return res.status(400).json({ error: "Missing required fields." });
     }
-
-    console.log("Checking for existing record with student_id:", student_id);
-
-    // Check if the student_id already exists
     const existingRecord = await AbsentRecord.findOne({
-      where: { student_id },
+       where: { student_id , batch_name, absent_date},
+      });
+     if (existingRecord) {
+      console.log("Existing record found");
+      return res.status(200).json({
+        message: "Existing record found",
+        record: existingRecord,
+      });
+     }else{
+      console.log("No existing record found. Creating new entry...");
+       const newRecord = await AbsentRecord.create({
+        student_id,
+        batch_name,
+        absent_date,
     });
-
-   
-  } catch (error) {
-    console.error("Error:", error);
-    res.status(500).json({ error: "Failed to add or update absent record." });
+    return res.status(201).json({
+      message: "New record created",
+      record: newRecord,
+    });
+      
   }
+} catch (error) {
+    console.error("Error:", error);
+    res.status(500).json({ error: "Failed to add absent record." });
+}
 };
 
 
 
 const video_request_approve = async (req, res) => {
   try {
-    const { id, user_id } = req.params; 
+    const { student_id, user_role_id, batch_name, absent_date } = req.body;; 
+    if (user_role_id == 1){
 
-    // if 
-    const record = await AbsentRecord.findOne(id);
-
-    if (!record) {
-        return res.status(404).json({ message: "Record not found" });
+      const record = await AbsentRecord.findOne({
+        where: { student_id , batch_name, absent_date},
+       });
+      if (!record) {
+          return res.status(404).json({ message: "Record not found" });
+      }
+  
+      record.approved_status = true;
+      await record.save();
+  
+      return res.status(200).json({
+          message: "Approved status updated successfully",
+          record,
+      });
     }
-
-    record.approved_status = true;
-    await record.save();
-
-    return res.status(200).json({
-        message: "Approved status updated successfully",
-        record,
-    });
 } catch (error) {
     console.error("Error updating approved status:", error);
     return res.status(500).json({ message: "Internal server error", error });
 }
 }
-module.exports = { stream, video_request, video_request_approve};
+const test = async (req, res) => {
+  
+  return res
+    .status(200)
+    .json({ message: "welcome" });
+
+};
+module.exports = { test, stream, video_request, video_request_approve};
 
