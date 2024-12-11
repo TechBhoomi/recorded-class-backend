@@ -3,62 +3,58 @@ const path = require("path");
 const AbsentRecord = require("../models/absent_records");
 
 
-// const stream = async (req, res) => {
-//     const absentDate = req.query.absent_date; // Access 'absent_date'
-//   const batchName = req.query.batch_name;   // Access 'batch_name'
+const stream = async (req, res) => {
+    let url_path = req.query.path; 
+if(url_path.includes("02_00.webm")){
+  url_path = url_path.replace(" 02_00.webm", "+02_00.webm")
+}
+  const videoRootDirectory = process.env.VIDEO_PATH;
+  const videoPath = path.resolve(
+    videoRootDirectory,
+    url_path
+  );
+  console.log(videoPath,"dfd");
 
-//   console.log(absentDate, batchName);
+  if (!fs.existsSync(videoPath)) {
+    return res.status(404).json({ message: "file not found" });
+  }
+  try {
+    const stat = await fs.promises.stat(videoPath);
+    if (!stat.isFile()) {
+      return res.status(404).json({ message: "file not found" });
+    }
+    res.setTimeout(30000, () => {
+      res.status(504).json({ message: "Request timed out" });
+    });
 
+    // Streaming starts
+    const readStream = fs.createReadStream(videoPath); 
+    readStream.on("open", () => { 
+      res.setHeader("Content-Type", "video/webm"); 
+      readStream.pipe(res); 
+    }); 
 
-//   const videoRootDirectory = process.env.VIDEO_PATH;
-// //   const { batchName, absentDate } = req.params;
-//   const videoPath = path.resolve(
-//     videoRootDirectory,
-//     batchName,
-//     absentDate
-//   ) + `+02_00.webm`;
-//   console.log(videoPath,"dfd");
+    readStream.on("error", err => {
+      console.error("Error reading file:", err);
+      if (!res.headersSent) {
+        res
+          .status(500)
+          .json({ message: "Internal Server Error Stream failed" });
+      }
+    });
 
-//   if (!fs.existsSync(videoPath)) {
-//     return res.status(404).json({ message: "file not found" });
-//   }
-//   try {
-//     const stat = await fs.promises.stat(videoPath);
-//     if (!stat.isFile()) {
-//       return res.status(404).json({ message: "file not found" });
-//     }
-//     res.setTimeout(30000, () => {
-//       res.status(504).json({ message: "Request timed out" });
-//     });
-
-//     // Streaming starts
-//     const readStream = fs.createReadStream(videoPath); 
-//     readStream.on("open", () => { 
-//       res.setHeader("Content-Type", "video/webm"); 
-//       readStream.pipe(res); 
-//     }); 
-
-//     readStream.on("error", err => {
-//       console.error("Error reading file:", err);
-//       if (!res.headersSent) {
-//         res
-//           .status(500)
-//           .json({ message: "Internal Server Error Stream failed" });
-//       }
-//     });
-
-//     res.on("close", () => {
-//       readStream.destroy();
-//     });
-//   } catch (err) {
-//     console.error("Error:", err);
-//     res.status(500).json({
-//       error: "Internal Server Error",
-//       data: err,
-//       path: videoPath,
-//     });
-//   }
-// };
+    res.on("close", () => {
+      readStream.destroy();
+    });
+  } catch (err) {
+    console.error("Error:", err);
+    res.status(500).json({
+      error: "Internal Server Error",
+      data: err,
+      path: videoPath,
+    });
+  }
+};
 
 // const stream = async (req, res) => {
 //     console.log(req.body.absent_date);
@@ -99,7 +95,7 @@ const AbsentRecord = require("../models/absent_records");
 //     }
 //   };
 
-const stream = async (req, res) => {
+const get_url_path = async (req, res) => {
   console.log(req.body.absent_date);
 
   let absentDates = req.body.absent_date;
@@ -127,7 +123,6 @@ const stream = async (req, res) => {
       return daysDiff <= 30;
     });
 
-
     if (absentDates.length === 0) {
       return res
         .status(400)
@@ -144,7 +139,8 @@ const stream = async (req, res) => {
       );
 
       result[absentDate] = matchingFiles.map(file =>
-        path.join(videoDirPath, file)
+        // console.log(path.join(batchName, file),"file")
+        path.join(batchName, file)
       );
     });
 
@@ -224,6 +220,7 @@ const video_request_approve = async (req, res) => {
     return res.status(500).json({ message: "Internal server error", error });
 }
 }
+
 const test = async (req, res) => {
   
   return res
@@ -231,5 +228,6 @@ const test = async (req, res) => {
     .json({ message: "welcome" });
 
 };
-module.exports = { test, stream, video_request, video_request_approve};
+
+module.exports = { test, stream, get_url_path, video_request, video_request_approve};
 
