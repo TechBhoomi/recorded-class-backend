@@ -99,23 +99,20 @@ const get_url_path = async (req, res) => {
   console.log(req.body.absent_date);
 
   let absentDates = req.body.absent_date;
-  const batchName = req.body.batch_name;
+  const student_id = req.body.student_id;
+  const batch_name = req.body.batch_name;
 
-  console.log(absentDates, batchName);
+  console.log(absentDates, batch_name);
 
   const videoRootDirectory = process.env.VIDEO_PATH;
   console.log(videoRootDirectory, "videoRootDirectory");
 
-  const videoDirPath = path.resolve(videoRootDirectory, batchName);
+  const videoDirPath = path.resolve(videoRootDirectory, batch_name);
   console.log(videoDirPath, "videoDirPath");
 
+  absentDates = absentDates.sort((a, b) => new Date(a) - new Date(b));
+  
   try {
-    if (absentDates.length > 5) {
-      return res
-        .status(400)
-        .json({ message: "You can only pass up to 5 absent dates." });
-    }
-
     const currentDate = new Date();
     absentDates = absentDates.filter(absentDate => {
       const dateDiff = Math.abs(currentDate - new Date(absentDate));
@@ -133,16 +130,35 @@ const get_url_path = async (req, res) => {
 
     const result = {};
 
-    absentDates.forEach(absentDate => {
-      const matchingFiles = files.filter(
-        file => file.includes(absentDate) && file.endsWith(".webm")
-      );
+    for (const [index, absent_date] of absentDates.entries()) {
+      console.log(absent_date, "absentDate");
+      let matchingFiles;
 
-      result[absentDate] = matchingFiles.map(file =>
-        // console.log(path.join(batchName, file),"file")
-        path.join(batchName, file)
+      if (index > 4) {
+        const record = await AbsentRecord.findOne({
+          where: { student_id, batch_name, absent_date, approved_status: true },
+        });
+        console.log(record);
+
+        if (!record) {
+          return res
+            .status(404)
+            .json({ message: `Record not approved for date: ${absent_date}` });
+        }
+
+        matchingFiles = files.filter(
+          file => file.includes(absent_date) && file.endsWith(".webm")
+        );
+      } else {
+        matchingFiles = files.filter(
+          file => file.includes(absent_date) && file.endsWith(".webm")
+        );
+      }
+
+      result[absent_date] = matchingFiles.map(file =>
+        path.join(batch_name, file)
       );
-    });
+    }
 
     const hasResults = Object.values(result).some(paths => paths.length > 0);
     if (!hasResults) {
