@@ -32,6 +32,14 @@ const AbsentRecord = sequelize.define("AbsentRecord", {
         defaultValue: false, 
         allowNull: false,
     },
+     details: {
+        type: DataTypes.JSONB, // JSONB type for storing structured data
+        allowNull: false,
+        defaultValue: [],
+        // validate: {
+        //     notEmpty: true,
+        // },
+    },
 }, {
     tableName: "absent_records",
     timestamps: true, // Adds `createdAt` and `updatedAt`

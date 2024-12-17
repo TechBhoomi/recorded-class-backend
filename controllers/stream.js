@@ -5,8 +5,8 @@ const AbsentRecord = require("../models/absent_records");
 
 const stream = async (req, res) => {
     let url_path = req.query.path; 
-if(url_path.includes("02_00.webm")){
-  url_path = url_path.replace(" 02_00.webm", "+02_00.webm")
+if(url_path.includes("02_00.")){
+  url_path = url_path.replace(" 02_00.", "+02_00.")
 }
   const videoRootDirectory = process.env.VIDEO_PATH;
   const videoPath = path.resolve(
@@ -109,13 +109,30 @@ const get_url_path = async (req, res) => {
 
   const videoDirPath = path.resolve(videoRootDirectory, batch_name);
   console.log(videoDirPath, "videoDirPath");
-
+  try {
+    await fs.promises.access(videoDirPath, fs.constants.R_OK);
+  } catch (err) {
+    console.error(`Directory does not exist or is not accessible: ${videoDirPath}`, err);
+    return res
+      .status(404)
+      .json({ message: `Directory not found: ${batch_name}`
+        // , details: err.message 
+      });
+  }
   absentDates = absentDates.sort((a, b) => new Date(a) - new Date(b));
   
   try {
     const currentDate = new Date();
     absentDates = absentDates.filter(absentDate => {
-      const dateDiff = Math.abs(currentDate - new Date(absentDate));
+      const dateObj = new Date(absentDate);
+      console.log(dateObj,"dateObj", currentDate);
+      console.log(dateObj > currentDate);
+      
+      if (dateObj > currentDate) {
+        console.log(`Skipping future date: ${absentDate}`);
+        return false;
+      }
+      const dateDiff = Math.abs(currentDate - dateObj);
       const daysDiff = dateDiff / (1000 * 60 * 60 * 24);
       return daysDiff <= 30;
     });
@@ -140,24 +157,39 @@ const get_url_path = async (req, res) => {
         });
         console.log(record);
 
-        if (!record) {
-          return res
-            .status(404)
-            .json({ message: `Record not approved for date: ${absent_date}` });
+        if (record) {
+          
+        matchingFiles = files.filter(
+          file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
+        );
+        console.log(matchingFiles,"matfinere");
+          // return res
+          //   .status(404)
+          //   .json({ message: `Record not approved for date: ${absent_date}` });
         }
 
-        matchingFiles = files.filter(
-          file => file.includes(absent_date) && file.endsWith(".webm")
-        );
+        // matchingFiles = files.filter(
+        //   file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
+        // );
+        // console.log(matchingFiles,"matfinere");
+        
       } else {
         matchingFiles = files.filter(
-          file => file.includes(absent_date) && file.endsWith(".webm")
+          file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
         );
       }
-
-      result[absent_date] = matchingFiles.map(file =>
-        path.join(batch_name, file)
-      );
+      if (!matchingFiles || matchingFiles.length === 0) {
+        // return res
+        //   .status(404)
+        //   .json({ message: `No matching files found for absent date: ${absent_date}` });
+      }else{
+        result[absent_date] = matchingFiles.map(file =>
+          path.join(batch_name, file)
+        );
+      }
+      console.log(absent_date,"absent_date");
+      
+     
     }
 
     const hasResults = Object.values(result).some(paths => paths.length > 0);
@@ -166,7 +198,19 @@ const get_url_path = async (req, res) => {
         .status(404)
         .json({ message: "No videos found matching the given absent dates." });
     }
+console.log(Object.values(result).length);
+if (Object.values(result).length > 5) {
+  const keys = Object.keys(result);
+  const removeCount = Object.values(result).length - 5; // How many to remove from the start
+  for (let i = 0; i < removeCount; i++) {
+    delete result[keys[i]]; // Remove the first few key-value pairs
+  }
 
+  // Add the last ones (the ones after the first `removeCount`)
+  for (let i = removeCount; i < keys.length; i++) {
+    result[keys[i]] = result[keys[i]]; // Ensure the last entries are kept
+  }
+}
     res.json(result);
   } catch (err) {
     console.error("Error reading directory:", err);
@@ -174,68 +218,7 @@ const get_url_path = async (req, res) => {
   }
 };
 
-const video_request = async (req, res) => {
-  try {
-    const { student_id, batch_name, absent_date } = req.body;
 
-    if (!student_id || !batch_name || !absent_date) {
-        return res.status(400).json({ error: "Missing required fields." });
-    }
-    const existingRecord = await AbsentRecord.findOne({
-       where: { student_id , batch_name, absent_date},
-      });
-     if (existingRecord) {
-      console.log("Existing record found");
-      return res.status(200).json({
-        message: "Existing record found",
-        record: existingRecord,
-      });
-     }else{
-      console.log("No existing record found. Creating new entry...");
-       const newRecord = await AbsentRecord.create({
-        student_id,
-        batch_name,
-        absent_date,
-    });
-    return res.status(201).json({
-      message: "New record created",
-      record: newRecord,
-    });
-      
-  }
-} catch (error) {
-    console.error("Error:", error);
-    res.status(500).json({ error: "Failed to add absent record." });
-}
-};
-
-
-
-const video_request_approve = async (req, res) => {
-  try {
-    const { student_id, user_role_id, batch_name, absent_date } = req.body;; 
-    if (user_role_id == 1){
-
-      const record = await AbsentRecord.findOne({
-        where: { student_id , batch_name, absent_date},
-       });
-      if (!record) {
-          return res.status(404).json({ message: "Record not found" });
-      }
-  
-      record.approved_status = true;
-      await record.save();
-  
-      return res.status(200).json({
-          message: "Approved status updated successfully",
-          record,
-      });
-    }
-} catch (error) {
-    console.error("Error updating approved status:", error);
-    return res.status(500).json({ message: "Internal server error", error });
-}
-}
 
 const test = async (req, res) => {
   
@@ -245,5 +228,5 @@ const test = async (req, res) => {
 
 };
 
-module.exports = { test, stream, get_url_path, video_request, video_request_approve};
+module.exports = { test, stream, get_url_path};
 
