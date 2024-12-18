@@ -8,6 +8,7 @@ const stream = async (req, res) => {
 if(url_path.includes("02_00.")){
   url_path = url_path.replace(" 02_00.", "+02_00.")
 }
+
   const videoRootDirectory = process.env.VIDEO_PATH;
   const videoPath = path.resolve(
     videoRootDirectory,
@@ -119,8 +120,14 @@ const get_url_path = async (req, res) => {
         // , details: err.message 
       });
   }
-  absentDates = absentDates.sort((a, b) => new Date(a) - new Date(b));
-  
+  // absentDates = absentDates.sort((a, b) => new Date(a) - new Date(b));
+  absentDates = absentDates
+  .map(date => new Date(date).toISOString().split('T')[0]) // Normalize dates to YYYY-MM-DD
+  .filter((date, index, self) => self.indexOf(date) === index) // Remove duplicates
+  .sort((a, b) => new Date(a) - new Date(b)); // Sort dates
+
+console.log(absentDates);
+
   try {
     const currentDate = new Date();
     absentDates = absentDates.filter(absentDate => {
@@ -145,52 +152,9 @@ const get_url_path = async (req, res) => {
 
     const files = await fs.promises.readdir(videoDirPath);
 
-    const result = {};
+    let result = {};
 
-    for (const [index, absent_date] of absentDates.entries()) {
-      console.log(absent_date, "absentDate");
-      let matchingFiles;
-
-      if (index > 4) {
-        const record = await AbsentRecord.findOne({
-          where: { student_id, batch_name, absent_date, approved_status: true },
-        });
-        console.log(record);
-
-        if (record) {
-          
-        matchingFiles = files.filter(
-          file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
-        );
-        console.log(matchingFiles,"matfinere");
-          // return res
-          //   .status(404)
-          //   .json({ message: `Record not approved for date: ${absent_date}` });
-        }
-
-        // matchingFiles = files.filter(
-        //   file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
-        // );
-        // console.log(matchingFiles,"matfinere");
-        
-      } else {
-        matchingFiles = files.filter(
-          file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
-        );
-      }
-      if (!matchingFiles || matchingFiles.length === 0) {
-        // return res
-        //   .status(404)
-        //   .json({ message: `No matching files found for absent date: ${absent_date}` });
-      }else{
-        result[absent_date] = matchingFiles.map(file =>
-          path.join(batch_name, file)
-        );
-      }
-      console.log(absent_date,"absent_date");
-      
-     
-    }
+    result = await absentDateValidation(absentDates, student_id, batch_name, files);
 
     const hasResults = Object.values(result).some(paths => paths.length > 0);
     if (!hasResults) {
@@ -218,7 +182,79 @@ if (Object.values(result).length > 5) {
   }
 };
 
+async function AbsentDateValidation(absentDates, student_id, batch_name, files) {
+  const result = {};
 
+  for (const [index, absent_date] of absentDates.entries()) {
+    console.log(absent_date, "absentDate");
+
+    let record;
+    if (index > 4) {
+      record = await AbsentRecord.findOne({
+        where: { student_id, batch_name, absent_date, approved_status: true },
+      });
+      console.log(record);
+    }
+
+    if (index <= 4 || record) {
+      const matchingFiles = files.filter(
+        file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
+      );
+
+      if (!matchingFiles || matchingFiles.length === 0) {
+        console.log(`No matching files found for absent date: ${absent_date}`);
+        // Uncomment the following line if this is part of an Express.js route
+        // return res.status(404).json({ message: `No matching files found for absent date: ${absent_date}` });
+      } else {
+        result[absent_date] = matchingFiles.map(file =>
+          path.join(batch_name, file)
+        );
+      }
+    }
+
+    console.log(absent_date, "absent_date");
+  }
+
+  return result; // Return the result object for further use
+}
+
+
+// function absentDateValidation(absentDates) {
+//   for (const [index, absent_date] of absentDates.entries()) {
+//     console.log(absent_date, "absentDate");
+//     let matchingFiles;
+
+//     if (index > 4) {
+//       const record = await AbsentRecord.findOne({
+//         where: { student_id, batch_name, absent_date, approved_status: true },
+//       });
+//       console.log(record);
+
+//       if (record) {
+//         matchingFiles = files.filter(
+//           file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
+//         );
+//         console.log(matchingFiles,"matfinere");
+//       }
+//     } else {
+//       matchingFiles = files.filter(
+//         file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
+//       );
+//     }
+//     if (!matchingFiles || matchingFiles.length === 0) {
+//       // return res
+//       //   .status(404)
+//       //   .json({ message: `No matching files found for absent date: ${absent_date}` });
+//     }else{
+//       result[absent_date] = matchingFiles.map(file =>
+//         path.join(batch_name, file)
+//       );
+//     }
+//     console.log(absent_date,"absent_date");
+    
+   
+//   }
+// }
 
 const test = async (req, res) => {
   
@@ -228,5 +264,5 @@ const test = async (req, res) => {
 
 };
 
-module.exports = { test, stream, get_url_path};
+module.exports = { test, stream, get_url_path, AbsentDateValidation};
 
