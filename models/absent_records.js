@@ -16,7 +16,7 @@ const AbsentRecord = sequelize.define("AbsentRecord", {
         type: DataTypes.STRING,
         allowNull: false,
     },
-    absent_date: {
+    requested_date: {
         type: DataTypes.STRING, 
         allowNull: false,
     },
@@ -32,10 +32,23 @@ const AbsentRecord = sequelize.define("AbsentRecord", {
         defaultValue: false, 
         allowNull: false,
     },
+    is_inactive: {
+        type: DataTypes.BOOLEAN, 
+        defaultValue: false, 
+        allowNull: false,
+    },
      details: {
         type: DataTypes.JSONB, // JSONB type for storing structured data
         allowNull: false,
-        defaultValue: [],
+        defaultValue: {},
+        // validate: {
+        //     notEmpty: true,
+        // },
+    },
+    video_details: {
+        type: DataTypes.JSONB, // JSONB type for storing structured data
+        allowNull: false,
+        defaultValue: {},
         // validate: {
         //     notEmpty: true,
         // },

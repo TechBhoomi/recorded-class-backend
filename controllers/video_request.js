@@ -7,18 +7,24 @@ const { AbsentDateValidation } = require("./stream");
 
 const video_request = async (req, res) => {
     try {
-      const { student_id, batch_name, absent_date } = req.body;
-  
-      if (!student_id || !batch_name || !absent_date) {
+      const { student_id, batch_name, requested_date,active_videos } = req.body;
+      let active_video_dates = active_videos 
+      if (!student_id || !batch_name || !requested_date || !active_video_dates) {
           return res.status(400).json({ error: "Missing required fields." });
       }
+      // active videos sort and remove duplicates
+      active_video_dates = active_video_dates
+        .map(date => new Date(date).toISOString().split('T')[0]) // Normalize dates to YYYY-MM-DD
+        .filter((date, index, self) => self.indexOf(date) === index)
+        .sort((a, b) => new Date(a) - new Date(b));
+      // 
       const currentDate = new Date();
-      const dateObj = new Date(absent_date);
+      const dateObj = new Date(requested_date);
       if (dateObj > currentDate) {
         return res.status(400).json({ error: "Cannot request for future dates" });
       }
       const existingRecord = await AbsentRecord.findOne({
-         where: { student_id , batch_name, absent_date},
+         where: { student_id , batch_name, requested_date, is_inactive: false},
         });
 
       // 
@@ -38,17 +44,13 @@ const video_request = async (req, res) => {
                 });
             }
           const files = await fs.promises.readdir(videoDirPath);
-          console.log(typeof(absent_date));
-          
-          const arr_absentDate = [absent_date];
-          console.log(arr_absentDate); 
+          const arr_absentDate = [requested_date];
          const result = await AbsentDateValidation(arr_absentDate, student_id, batch_name, files);
-         console.log(result,"result");
          if (Object.keys(result).length === 0) {
           console.log("Object is empty");
           return res
                 .status(404)
-                .json({ message: `Video not available for the requested date: ${absent_date}`
+                .json({ message: `Video not available for the requested date: ${requested_date}`
                   // , details: err.message 
                 });
         } else {
@@ -61,12 +63,17 @@ const video_request = async (req, res) => {
             });
            }else{
             console.log("No existing record found. Creating new entry...");
+            const video_details = {
+              "active_video_dates":active_video_dates,
+              "requested_video_date":requested_date
+            }
              const newRecord = await AbsentRecord.create({
               student_id,
               batch_name,
-              absent_date,
+              requested_date,
+              video_details
           });
-          return res.status(201).json({
+          return res.status(200).json({
             message: "New record created",
             record: newRecord,
           });
@@ -84,48 +91,54 @@ const video_request = async (req, res) => {
   
   const video_request_approve = async (req, res) => {
     try {
-      const { id,role, user_id, approved_status, reason} = req.body;; 
-      if (approved_status=== false && reason == ""){
+      const { id, role, user_id, approved_status, reason } = req.body;
+  
+      if (approved_status === false && reason === "") {
         return res.status(400).json({ message: "Please provide reject reason" });
-      } 
-      if (role === 'corporate_admin'){
+      }
+  
+      if (role === 'corporate_admin') {
         const record = await AbsentRecord.findOne({
           where: { id },
-         });
-        
+        });
   
         if (record) {
-          
+          record.is_inactive = true;
           record.approved_status = approved_status;
+  
           const newDetails = {
             reviewed_by: "sdfs",
             reviewed_by_id: user_id,
             reject_reason: reason || "",
             reviewed_at: new Date().toISOString(),
           };
-      
-          const currentDetails = Array.isArray(record.details) ? record.details : [];
-          currentDetails.push(newDetails);
-          record.details = currentDetails;
+  
+          // Instead of pushing to an array, directly assign the object to 'details'
+          record.details = newDetails;
           record.changed("details", true); // Mark as modified
           await record.save();
           console.log("Updated details:", record.details);
         } else {
           console.log("Record not found");
-        }
-    
-        return res.status(200).json({
-            message: "Approved status updated successfully",
+          return res.status(200).json({
+            message: "Record not found",
             record,
+          });
+        }
+  
+        return res.status(200).json({
+          message: "Approved status updated successfully",
+          record,
         });
-      }else{
-        return res.status(401).json({ message: "You dont have access to perform this action" });
+      } else {
+        return res.status(401).json({ message: "You don't have access to perform this action" });
       }
-  } catch (error) {
+    } catch (error) {
       console.error("Error updating approved status:", error);
       return res.status(500).json({ message: "Internal server error", error });
-  }
-  }
+    }
+  };
+  
 // get requested list for admin 
 const getRequests = async (req, res) => {
   try {
@@ -151,7 +164,7 @@ const getRequests = async (req, res) => {
           replacements.student_id = student_id;
       }
 
-      recordsQuery += ` ORDER BY id ASC LIMIT :limit OFFSET :offset`;
+      recordsQuery += ` ORDER BY is_inactive,"createdAt" LIMIT :limit OFFSET :offset`;
 
       const records = await sequelize.query(recordsQuery, {
           replacements,
