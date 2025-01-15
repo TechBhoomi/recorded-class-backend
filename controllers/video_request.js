@@ -7,7 +7,7 @@ const { AbsentDateValidation } = require("./stream");
 
 const video_request = async (req, res) => {
     try {
-      const { student_id, batch_name, requested_date,active_videos } = req.body;
+      const { student_id, batch_name, requested_date,active_videos,comment } = req.body;
       let active_video_dates = active_videos 
       if (!student_id || !batch_name || !requested_date || !active_video_dates) {
           return res.status(400).json({ error: "Missing required fields." });
@@ -71,7 +71,8 @@ const video_request = async (req, res) => {
               student_id,
               batch_name,
               requested_date,
-              video_details
+              video_details,
+              comment
           });
           return res.status(200).json({
             message: "New record created",

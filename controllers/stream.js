@@ -100,7 +100,7 @@ const get_url_path2 = async (req, res) => {
     console.error(`Directory does not exist or is not accessible: ${videoDirPath}`, err);
     return res
       .status(404)
-      .json({ message: `Directory not found: ${batch_name}`
+      .json({ error: `Directory not found: ${batch_name}`
         // , details: err.message 
       });
   }
@@ -109,7 +109,7 @@ const get_url_path2 = async (req, res) => {
   absentDates = absentDates
   .map(date => new Date(date).toISOString().split('T')[0]) // Normalize dates to YYYY-MM-DD
   .filter((date, index, self) => self.indexOf(date) === index) // Remove duplicates
-  .sort((a, b) => new Date(a) - new Date(b)); // Sort dates
+  // .sort((a, b) => new Date(a) - new Date(b)); // Sort dates
   
  
    
@@ -195,8 +195,8 @@ const IsReqested = async (student_id, batch_name) =>{
     // const updatedArr = requested_dates.push(ele.video_details.requested_video_date)
     return { active_dates, requested_dates_length: active_dates.length }
    }
-   console.log(active_dates);
    active_dates = active_dates.concat(requested_dates)
+   console.log(active_dates);
    
   return  { active_dates, requested_dates_length: requested_dates.length }
 }
@@ -243,7 +243,7 @@ const sortAndOrderDates = async (absentDates) => {
   
   absentDates = absentDates.map(date => new Date(date).toISOString().split('T')[0]) // Normalize dates to YYYY-MM-DD
   .filter((date, index, self) => self.indexOf(date) === index) // Remove duplicates
-  .sort((a, b) => new Date(a) - new Date(b)); // Sort dates
+  // .sort((a, b) => new Date(a) - new Date(b)); // Sort dates
   return absentDates;
 };
 // to skip future dates
@@ -274,15 +274,15 @@ const get_url_path = async (req, res) => {
   try {
     await fs.promises.access(videoDirPath, fs.constants.R_OK);
   } catch (err) {
-    return res.status(404).json({ message: `Directory not found: ${batch_name}`});
+    return res.status(404).json({ error: `Directory not found: ${batch_name}`});
   }
-console.log(absent_date);
+
 
 absent_date = await sortAndOrderDates(absent_date);
   
   try {
     absent_date = await skipFutureDates(absent_date);
-
+    console.log(absent_date,"after sorting and skipping future dates");
     if (absent_date.length === 0) {
       return res
         .status(400)
@@ -302,7 +302,6 @@ absent_date = await sortAndOrderDates(absent_date);
           );
             if (!matchingFiles || matchingFiles.length === 0) {
               console.log(`No matching files found for absent date: ${date}`);
-              // Uncomment the following line if this is part of an Express.js route
               // return res.status(404).json({ message: `No matching files found for absent date: ${absent_date}` });
             } else {
               result[date] = matchingFiles.map(file =>
@@ -345,6 +344,9 @@ absent_date = await sortAndOrderDates(absent_date);
               }
           }
       }else{
+        if (absent_date.length > 5) {
+          absent_date = absent_date.slice(0, 5); // Keep only the first 5 elements
+        }
         absent_date.map((date)=>{
           const matchingFiles = files.filter(
             file => file.includes(date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
@@ -354,6 +356,8 @@ absent_date = await sortAndOrderDates(absent_date);
               // Uncomment the following line if this is part of an Express.js route
               // return res.status(404).json({ message: `No matching files found for absent date: ${absent_date}` });
             } else {
+              console.log(result,"result");
+              
               result[date] = matchingFiles.map(file =>
                 path.join(batch_name, file)
               );
@@ -362,33 +366,14 @@ absent_date = await sortAndOrderDates(absent_date);
       }
       }
 
-    
-  
-      // if (index <= 4 ) {
-      //   const matchingFiles = files.filter(
-      //     file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
-      //   );
-  
-      //   if (!matchingFiles || matchingFiles.length === 0) {
-      //     console.log(`No matching files found for absent date: ${absent_date}`);
-      //     // Uncomment the following line if this is part of an Express.js route
-      //     // return res.status(404).json({ message: `No matching files found for absent date: ${absent_date}` });
-      //   } else {
-      //     result[absent_date] = matchingFiles.map(file =>
-      //       path.join(batch_name, file)
-      //     );
-      //   }
-      // }
-  
-      // console.log(absent_date, "absent_date");
-    // }
-
     const hasResults = Object.values(result).some(paths => paths.length > 0);
     if (!hasResults) {
       return res
         .status(404)
         .json({ message: "No videos found matching the given absent dates." });
     }
+    console.log(Object.keys(result),"bject.values(result).length");
+    
     if (Object.values(result).length > 5) {
   const keys = Object.keys(result);
   const removeCount = Object.values(result).length - 5; // How many to remove from the start
@@ -401,6 +386,8 @@ absent_date = await sortAndOrderDates(absent_date);
     result[keys[i]] = result[keys[i]]; // Ensure the last entries are kept
   }
     }
+    console.log(result,"result99999");
+    
     res.json(result);
   } catch (err) {
     console.error("Error reading directory:", err);
