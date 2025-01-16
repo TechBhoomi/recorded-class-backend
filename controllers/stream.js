@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { Op } = require('sequelize'); 
 const AbsentRecord = require("../models/absent_records");
 
 
@@ -167,8 +168,12 @@ const get_url_path2 = async (req, res) => {
 };
 
 const IsReqested = async (student_id, batch_name) =>{
+  console.log("hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh");
+  
   const existingRecord = await AbsentRecord.findAll({
-    where: { student_id ,batch_name, approved_status: true},
+    where: { student_id ,batch_name, approved_status: true,updatedAt: {
+      [Op.gte]: new Date(new Date() - 30 * 24 * 60 * 60 * 1000), // Calculate date 30 days ago
+    }},
     order: [    // Sort by 'is_active' first (descending)
       ['id', 'ASC'],     // Then sort by 'createdAt' (ascending)
     ],
@@ -316,20 +321,7 @@ absent_date = await sortAndOrderDates(absent_date);
       if (requestedDatesApended.active_dates.length > 0){
         for (const [index, absent_date] of requestedDatesApended.active_dates.entries()) {
           console.log(absent_date, "absentDate");
-          // if (absent_date.length < 5){
-          //   console.log("absent length is < 5");
-          //   res.json(result)
-          // }else{
-          // requestedDatesApended = await IsReqested(student_id, batch_name)
-          // }
-          // console.log(requestedDatesApended.active_dates,  requestedDatesApended.requested_dates_length,"requestedappended");
-          // let record;
-          // if (index > 4) {
-            // record = await AbsentRecord.findOne({
-            //   where: { student_id, batch_name, absent_date, approved_status: true },
-            // });
-            // console.log(record);
-            
+        
             const matchingFiles = files.filter(
               file => file.includes(absent_date) && (file.endsWith(".webm") || file.endsWith(".mp4"))
             );
