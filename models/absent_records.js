@@ -49,6 +49,12 @@ const AbsentRecord = sequelize.define("AbsentRecord", {
         //     notEmpty: true,
         // },
     },
+    student_details: {
+        type: DataTypes.JSONB,
+        allowNull: false,
+        defaultValue: {},
+        
+    },
     video_details: {
         type: DataTypes.JSONB, // JSONB type for storing structured data
         allowNull: false,
