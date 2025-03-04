@@ -3,8 +3,8 @@ const path = require("path");
 const { Op } = require('sequelize'); 
 const AbsentRecord = require("../models/absent_records");
 
-const GetThirtyDaysAgo = () => new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-// const GetThirtyDaysAgo = () => new Date(new Date("2025-02-14T17:55:25.684Z").getTime() - 30 * 24 * 60 * 60 * 1000);
+const GetThirtyDaysAgo = () => new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+// const GetThirtyDaysAgo = () => new Date(new Date("2025-02-24T17:55:25.684Z").getTime() - 30 * 24 * 60 * 60 * 1000);
 
 // console.log(GetThirtyDaysAgo().toISOString()); // 
 
@@ -16,14 +16,13 @@ const IsWithinThirtyDays = (date, referenceDate = new Date()) => {
 
 const sortAndFilterDates = (dates) => {
   let today = new Date();
-  // today = new Date("2025-02-14T17:55:25.684Z");
-  console.log(today,"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk");
+  // today = new Date("2025-02-24T17:55:25.684Z");
   
   const thirtyDaysAgo = GetThirtyDaysAgo();
   return dates
     .filter((date) => {
       const targetDate = new Date(date);
-      return targetDate >= thirtyDaysAgo && targetDate <= today; // Ensure date is within the last 30 days
+      return targetDate >= thirtyDaysAgo && targetDate <= today; // Ensure date is within the last 7 days
     })
     .sort((a, b) => new Date(a) - new Date(b)); // Sort in descending order
 };
@@ -55,20 +54,9 @@ const IsRequested = async (student_id, batch_name, absent_dates) => {
     console.log(record.video_details.updated_dates);
     
   });
-  console.log("Valid updated Dates:", updatedDates);
-  // Filter absent dates to include only those within 30 days
-  // const validAbsentDates = absent_dates.filter(IsWithinThirtyDays);
-  console.log("Valid Absent Dates:", activeDates);
-  // Combine requested dates and absent dates, ensuring no duplicates
+
   const allDates = activeDates.concat(requestedDates)
-  // [...new Set([...activeDates, ...requestedDates])];
 
-  // Sort and limit the dates to the most recent 5
-  // const validDates = sortAndFilterDates(allDates);
-
-  // console.log("Valid Absent Dates:", validAbsentDates);
-  console.log("Requested Dates:", requestedDates);
-  console.log("Final Active Dates:", allDates);
 
   return {
     active_dates: allDates,

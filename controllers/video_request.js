@@ -1,10 +1,11 @@
-const fs = require("fs");
+const fs = require('fs-extra');
 const path = require("path");
 const AbsentRecord = require("../models/absent_records");
 const sequelize = require("../config/db");
+const SftpClient = require("ssh2-sftp-client");
 const { AbsentDateValidation } = require("./stream");
 const { log } = require("console");
-const { transferFiles } = require("../helper/video_downloads")
+const { transferFiles, connectSFTP } = require("../helpers/video_downloads")
 
 const video_request = async (req, res) => {
   try {
@@ -26,8 +27,12 @@ const video_request = async (req, res) => {
     const existingRecord = await AbsentRecord.findOne({
       where: { student_id, batch_name, requested_date, is_inactive: false },
     });
-
+    const existingRecordCount = await AbsentRecord.findAndCountAll({
+      where: { student_id, batch_name, requested_date,approved_status:true },
+    });
     // 
+    console.log(existingRecordCount,"existingRecordCount");
+    
     const videoRootDirectory = process.env.VIDEO_PATH2;
     console.log(videoRootDirectory, "videoRootDirectory");
 
@@ -36,65 +41,72 @@ const video_request = async (req, res) => {
     try {
       await fs.promises.access(videoDirPath, fs.constants.R_OK);
     } catch (err) {
+      await fs.ensureDir(videoDirPath);
       console.error(`Directory does not exist or is not accessible: ${videoDirPath}`, err);
-      return res
-        .status(404)
-        .json({
-          message: `Directory not found: ${batch_name}`
-          // , details: err.message 
-        });
+      // return res
+      //   .status(404)
+      //   .json({
+      //     message: `Directory not found: ${batch_name}`
+      //     // , details: err.message 
+      //   });
     }
     const files = await fs.promises.readdir(videoDirPath);
     const arr_absentDate = [requested_date];
-    const result = await AbsentDateValidation(arr_absentDate, student_id, batch_name, files);
-    if (Object.keys(result).length === 0) {
-      console.log("Object is empty");
-      return res
-        .status(404)
-        .json({
-          message: `Video not available for the requested date: ${requested_date}`
-          // , details: err.message 
-        });
+
+
+    if (existingRecord) {
+      return res.status(400).json({
+        message: "Existing request found!",
+        record: existingRecord,
+      });
     } else {
-      console.log("Object is not empty");
-      if (existingRecord) {
-        console.log("Existing record found");
-        return res.status(400).json({
-          message: "Existing request found!",
-          record: existingRecord,
-        });
+      console.log("No existing record found. Creating new entry...");
+      const student_details = {
+        "name": name,
+        "contact": contact,
+        "email": email
+      }
+      const video_details = {
+        "active_video_dates": active_video_dates,
+        "requested_video_date": requested_date
+      }
+
+      const newRecord = await AbsentRecord.create({
+        student_id,
+        batch_name,
+        requested_date,
+        video_details: video_details,
+        student_details,
+        comment
+      });
+
+      res.status(200).json({
+        message: "Request created successfully!",
+        record: newRecord,
+      });
+      const result = await AbsentDateValidation(arr_absentDate, student_id, batch_name, files);
+      console.log(result,"result");
+
+      if (result[requested_date].length === 0) {
+        console.log("Object is empty");
+        // approved_status = false;
+
+        const newDetails = {
+          reviewed_by: "auto",
+          reviewed_by_id: "-",
+          reject_reason: "No videos found for the requested date.",
+          reviewed_at: new Date().toISOString(),
+        };
+        await AbsentRecord.update(
+          { is_inactive: true, approved_status: false, details: newDetails },
+          { where: { student_id, batch_name, requested_date, is_inactive: false } }
+        );
       } else {
-        console.log("No existing record found. Creating new entry...");
-        const student_details = {
-          "name": name,
-          "contact": contact,
-          "email": email
-        }
-        const video_details = {
-          "active_video_dates": active_video_dates,
-          "requested_video_date": requested_date
-        }
-        console.log(video_details, "vid details");
-        // const videoDetailsString = JSON.stringify(video_details);
-        console.log(student_id, batch_name, requested_date, video_details, comment, "payload");
-
-        const newRecord = await AbsentRecord.create({
-          student_id,
-          batch_name,
-          requested_date,
-          video_details: video_details,
-          student_details, // Pass the stringified JSON here
-          comment
-        });
-        console.log(newRecord, "newRecord");
-
-        return res.status(200).json({
-          message: "Request created successfully!",
-          record: newRecord,
-        });
 
       }
+
     }
+    // }
     // 
 
   } catch (error) {
@@ -106,8 +118,8 @@ const video_request = async (req, res) => {
 
 const video_request_approve = async (req, res) => {
   try {
-    
-    const { id, role, user_id, approved_status, reason } = req.body;
+
+    const { id, role, user_id, user_name, approved_status, reason } = req.body;
 
     if (approved_status === false && reason === "") {
       return res.status(400).json({ message: "Please provide reject reason" });
@@ -119,42 +131,48 @@ const video_request_approve = async (req, res) => {
       });
 
       if (record) {
-        record.is_inactive = true;
-        record.approved_status = approved_status;
+        if (record.is_inactive == false) {
+          console.log(record.is_inactive, record.approved_status, "approved_status");
 
-        const newDetails = {
-          reviewed_by: "sdfs",
-          reviewed_by_id: user_id,
-          reject_reason: reason || "",
-          reviewed_at: new Date().toISOString(),
-        };
-        if (approved_status === true) {
-          await transferFiles(record.batch_name, record.video_details.requested_video_date);
-          console.log(record.video_details.active_video_dates);
+          record.is_inactive = true;
+          record.approved_status = approved_status;
 
-          const oldData = [...record.video_details.active_video_dates];
-          record.video_details.active_video_dates.push(record.video_details.requested_video_date);
-          const newData = [...record.video_details.active_video_dates];
+          const newDetails = {
+            reviewed_by: user_name,
+            reviewed_by_id: user_id,
+            reject_reason: reason || "",
+            reviewed_at: new Date().toISOString(),
+          };
+          if (approved_status === true) {
 
-          console.log("Old Data:", oldData); // Output: [10, 20, 30, 40, 50]
-          console.log("New Data:", newData); // Output: [10, 20, 30, 40, 50, 60, 70, 80]
-          // console.log(updated_date, x,"updated_date");
+            console.log(record.video_details.active_video_dates);
 
-          const updatedVideoDetails = {
-            active_video_dates: oldData,
-            requested_video_date: record.video_details.requested_video_date,
-            updated_dates: newData
+            const oldData = [...record.video_details.active_video_dates];
+            record.video_details.active_video_dates.push(record.video_details.requested_video_date);
+            const newData = [...record.video_details.active_video_dates];
+
+            const updatedVideoDetails = {
+              active_video_dates: oldData,
+              requested_video_date: record.video_details.requested_video_date,
+              updated_dates: newData
+            }
+            console.log(updatedVideoDetails, "updatedVideoDetails");
+
+            record.video_details = updatedVideoDetails
+
           }
-          console.log(updatedVideoDetails, "updatedVideoDetails");
-
-          record.video_details = updatedVideoDetails
-      
+          // Instead of pushing to an array, directly assign the object to 'details'
+          record.details = newDetails;
+          record.changed("details", true); // Mark as modified
+          await record.save();
+          console.log("Updated details:", record.details);
+        } else {
+          return res.status(200).json({
+            message: "Record already Approved/Rejected",
+            record,
+          });
         }
-        // Instead of pushing to an array, directly assign the object to 'details'
-        record.details = newDetails;
-        record.changed("details", true); // Mark as modified
-        await record.save();
-        console.log("Updated details:", record.details);
+
       } else {
         console.log("Record not found");
         return res.status(200).json({
@@ -162,9 +180,8 @@ const video_request_approve = async (req, res) => {
           record,
         });
       }
-
       return res.status(200).json({
-        message: "Approved status updated successfully",
+        message: "Status updated successfully",
         record,
       });
     } else {
@@ -186,7 +203,7 @@ const getRequests = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
 
-    console.log("Student ID:", parseInt(student_id), "id:", id, "Page:", page, "Limit:", limit, "Offset:", offset, "contact",contact);
+    console.log("Student ID:", parseInt(student_id), "id:", id, "Page:", page, "Limit:", limit, "Offset:", offset, "contact", contact);
 
     // Query to fetch records with WHERE condition, LIMIT, and OFFSET
     let recordsQuery = `
@@ -213,21 +230,20 @@ const getRequests = async (req, res) => {
       replacements.id = parseInt(id);
     }
     if (approved) {
-     
       if (approved === '3') {
-         recordsQuery += ` AND approved_status = false AND is_inactive = false`;
+        recordsQuery += ` AND approved_status = false AND is_inactive = false`;
         // replacements.approved = false;
       } else if (approved === '0') {
         recordsQuery += ` AND approved_status = false AND is_inactive = true`;
         // replacements.approved = approved;
-      }else if (approved === '1'){
+      } else if (approved === '1') {
         recordsQuery += ` AND approved_status = true AND is_inactive = true`;
         // replacements.approved = tr;
-      } 
+      }
     }
     if (search_key) {
       recordsQuery += ` AND batch_name ILIKE :search_key`;
-      replacements.search_key = `%${search_key}%`; 
+      replacements.search_key = `%${search_key}%`;
     }
 
     recordsQuery += ` ORDER BY is_inactive,"createdAt" desc LIMIT :limit OFFSET :offset`;
@@ -255,20 +271,20 @@ const getRequests = async (req, res) => {
     if (approved) {
       if (approved === '3') {
         countQuery += ` AND approved_status = false AND is_inactive = false`;
-    //  replacements.approved = false;
-     } else if(approved === '0') {
-      countQuery += ` AND approved_status = false AND is_inactive = true`;
-    //  replacements.approved = approved;
-     }else if (approved === '1'){
-      countQuery += ` AND approved_status = true AND is_inactive = true`;
-     }
+        //  replacements.approved = false;
+      } else if (approved === '0') {
+        countQuery += ` AND approved_status = false AND is_inactive = true`;
+        //  replacements.approved = approved;
+      } else if (approved === '1') {
+        countQuery += ` AND approved_status = true AND is_inactive = true`;
+      }
       // countQuery += ` AND approved_status = :approved`;
     }
     if (search_key) {
       countQuery += ` AND batch_name ILIKE '%${search_key}%' `;
     }
     const [countResult] = await sequelize.query(countQuery, {
-      replacements: { student_id, id,approved, search_key,contact },
+      replacements: { student_id, id, approved, search_key, contact },
       type: sequelize.QueryTypes.SELECT,
     });
 
@@ -290,7 +306,223 @@ const getRequests = async (req, res) => {
 
 
 // 
+const remoteDir = "/home/techreactive/var/www/html/videos/";
+const localDir = "/home/recorded-class-backend/public/videos/downloaded_videos/";
 
+const serverAConfig = {
+  host: "92.204.168.59",
+  user: "root",
+  password: "uhMJ4WJmTFhF",
+  port: 22,
+  readyTimeout: 600000
+};
+// Optimized SFTP fetch function
+// Connection pool to reuse SFTP connections
+// const ConnectionPool = {
+//   connections: new Map(),
+//   async getConnection(config, serverName) {
+//     const key = `${config.host}:${config.port}`;
+//     let connection = this.connections.get(key);
 
+//     if (connection?.sftp) {
+//       try {
+//         // Test if connection is still alive
+//         await connection.sftp.list('/');
+//         return connection.sftp;
+//       } catch (error) {
+//         // Connection dead, remove it
+//         this.connections.delete(key);
+//       }
+//     }
+
+//     // Create new connection
+//     const sftp = new SftpClient();
+//     await this.connectWithRetry(sftp, config, serverName);
+
+//     this.connections.set(key, {
+//       sftp,
+//       lastUsed: Date.now()
+//     });
+
+//     return sftp;
+//   },
+
+//   async connectWithRetry(sftp, config, serverName) {
+//     let retries = 3;
+//     let lastError;
+
+//     while (retries > 0) {
+//       try {
+//         await sftp.connect(config);
+//         return;
+//       } catch (error) {
+//         lastError = error;
+//         retries--;
+//         if (retries > 0) {
+//           await new Promise(resolve => setTimeout(resolve, 1000));
+//         }
+//       }
+//     }
+//     throw lastError;
+//   },
+
+//   // Clean up old connections periodically
+//   cleanup() {
+//     const MAX_IDLE_TIME = 5 * 60 * 1000; // 5 minutes
+//     for (const [key, connection] of this.connections.entries()) {
+//       if (Date.now() - connection.lastUsed > MAX_IDLE_TIME) {
+//         connection.sftp.end();
+//         this.connections.delete(key);
+//       }
+//     }
+//   }
+// };
+
+// // Start cleanup interval
+// setInterval(() => ConnectionPool.cleanup(), 60000);
+
+// // Cache for video file listings
+// const FileListCache = {
+//   cache: new Map(),
+//   TTL: 5 * 60 * 1000, // 5 minutes
+
+//   set(key, value) {
+//     this.cache.set(key, {
+//       value,
+//       timestamp: Date.now()
+//     });
+//   },
+
+//   get(key) {
+//     const entry = this.cache.get(key);
+//     if (!entry) return null;
+//     if (Date.now() - entry.timestamp > this.TTL) {
+//       this.cache.delete(key);
+//       return null;
+//     }
+//     return entry.value;
+//   }
+// };
+
+// async function fetchVideoDetails(batch_name, date) {
+//   const cacheKey = `${batch_name}:${date}`;
+//   const cachedResult = FileListCache.get(cacheKey);
+//   if (cachedResult) {
+//     return cachedResult;
+//   }
+
+//   const batchRemoteDir = path.join(String(remoteDir), String(batch_name));
+
+//   try {
+//     const sftpA = await ConnectionPool.getConnection(serverAConfig, "Server A");
+//     const files = await sftpA.list(batchRemoteDir);
+//     const dateFiles = files.filter(file => file.name.includes(date));
+
+//     const result = {
+//       files: dateFiles,
+//       unavailableFiles: dateFiles.length ? [] : [date],
+//       error: null
+//     };
+
+//     FileListCache.set(cacheKey, result);
+//     return result;
+
+//   } catch (error) {
+//     console.error('SFTP Error:', error.message);
+//     return { files: [], unavailableFiles: [], error: error.message };
+//   }
+// }
+
+// // Optimize the video request handler to use batch operations
+// const video_request = async (req, res) => {
+//   try {
+//     const {
+//       student_id,
+//       batch_name,
+//       requested_date,
+//       active_videos = [],
+//       comment = '',
+//       name,
+//       contact,
+//       email
+//     } = req.body;
+
+//     if (!student_id || !batch_name || !requested_date ) {
+//       return res.status(400).json({ error: "Missing required fields." });
+//     }
+
+//     const currentDate = new Date().setHours(0, 0, 0, 0);
+//     const requestedDateObj = new Date(requested_date).setHours(0, 0, 0, 0);
+
+//     if (requestedDateObj > currentDate) {
+//       return res.status(400).json({ error: "Cannot request for future dates" });
+//     }
+
+//     const active_video_dates = [...new Set(
+//       active_videos.map(date => new Date(date).toISOString().split('T')[0])
+//     )];
+
+//     // Batch database operations
+//     const [existingRecord, localFiles] = await Promise.all([
+//       AbsentRecord.findOne({
+//         where: {
+//           student_id,
+//           batch_name,
+//           requested_date,
+//           is_inactive: false
+//         }
+//       }),
+//       fs.promises.readdir(path.resolve(process.env.VIDEO_PATH2, batch_name))
+//         .catch(() => [])
+//     ]);
+
+//     if (existingRecord) {
+//       return res.status(400).json({
+//         message: "Existing request found!",
+//         record: existingRecord,
+//       });
+//     }
+
+//     // Check local files first before SFTP
+//     const matchingLocalFiles = localFiles.filter(file =>
+//       file.includes(requested_date) && /\.(webm|mp4)$/.test(file)
+//     );
+
+//     let videoFiles;
+//     if (!matchingLocalFiles.length) {
+//       const { files: remoteFiles } = await fetchVideoDetails(batch_name, requested_date);
+//       videoFiles = remoteFiles;
+//     } else {
+//       videoFiles = matchingLocalFiles.map(file => ({ name: file }));
+//     }
+
+//     if (!videoFiles.length) {
+//       return res.status(404).json({
+//         message: `Video not available for the requested date: ${requested_date}`
+//       });
+//     }
+
+//     const newRecord = await AbsentRecord.create({
+//       student_id,
+//       batch_name,
+//       requested_date,
+//       video_details: {
+//         active_video_dates,
+//         requested_video_date: requested_date
+//       },
+//       student_details: { name, contact, email },
+//       comment
+//     });
+
+//     return res.status(200).json({
+//       message: "Request created successfully!",
+//       record: newRecord,
+//     });
+
+//   } catch (error) {
+//     console.error("Error:", error);
+//     res.status(500).json({ error: "Failed to add absent record." });
+//   }
+// };
 
 module.exports = { video_request, video_request_approve, getRequests };
