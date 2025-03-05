@@ -125,7 +125,7 @@ const video_request_approve = async (req, res) => {
       return res.status(400).json({ message: "Please provide reject reason" });
     }
 
-    if (role === 'corporate_admin') {
+    if (role === 'admin' || role === "trackerverifier") {
       const record = await AbsentRecord.findOne({
         where: { id },
       });
@@ -197,7 +197,7 @@ const video_request_approve = async (req, res) => {
 const getRequests = async (req, res) => {
   try {
     // Get 'page', 'limit', and 'student_id' from query parameters
-    const { id, search_key, approved, contact } = req.query
+    const { id, search_key, approved, contact } = req.query;
     const student_id = parseInt(req.query.st_id);
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -207,9 +207,9 @@ const getRequests = async (req, res) => {
 
     // Query to fetch records with WHERE condition, LIMIT, and OFFSET
     let recordsQuery = `
-          SELECT * FROM absent_records
-          WHERE 1=1
-      `;
+      SELECT * FROM absent_records
+      WHERE 1=1
+    `;
 
     // Add WHERE clause if student_id is provided
     const replacements = { limit, offset };
@@ -220,9 +220,9 @@ const getRequests = async (req, res) => {
     }
     if (contact) {
       recordsQuery += ` AND EXISTS (
-    SELECT 1 
-    FROM jsonb_array_elements(student_details->'contact') AS contacts
-    WHERE contacts->>'number' = :contact) `;
+        SELECT 1 
+        FROM jsonb_array_elements(student_details->'contact') AS contacts
+        WHERE contacts->>'number' = :contact) `;
       replacements.contact = contact;
     }
     if (parseInt(id)) {
@@ -232,13 +232,10 @@ const getRequests = async (req, res) => {
     if (approved) {
       if (approved === '3') {
         recordsQuery += ` AND approved_status = false AND is_inactive = false`;
-        // replacements.approved = false;
       } else if (approved === '0') {
         recordsQuery += ` AND approved_status = false AND is_inactive = true`;
-        // replacements.approved = approved;
       } else if (approved === '1') {
         recordsQuery += ` AND approved_status = true AND is_inactive = true`;
-        // replacements.approved = tr;
       }
     }
     if (search_key) {
@@ -257,10 +254,9 @@ const getRequests = async (req, res) => {
     let countQuery = `SELECT COUNT(*) AS count FROM absent_records WHERE 1=1`;
     if (contact) {
       countQuery += ` AND EXISTS (
-    SELECT 1 
-    FROM jsonb_array_elements(student_details->'contact') AS contacts
-    WHERE contacts->>'number' = :contact) `;
-      // replacements.contact = contact;
+        SELECT 1 
+        FROM jsonb_array_elements(student_details->'contact') AS contacts
+        WHERE contacts->>'number' = :contact) `;
     }
     if (student_id) {
       countQuery += ` AND student_id = :student_id`;
@@ -268,17 +264,15 @@ const getRequests = async (req, res) => {
     if (parseInt(id)) {
       countQuery += ` AND id = :id`;
     }
+    // approved 1 , rejected -0 pending -3
     if (approved) {
       if (approved === '3') {
         countQuery += ` AND approved_status = false AND is_inactive = false`;
-        //  replacements.approved = false;
       } else if (approved === '0') {
         countQuery += ` AND approved_status = false AND is_inactive = true`;
-        //  replacements.approved = approved;
       } else if (approved === '1') {
         countQuery += ` AND approved_status = true AND is_inactive = true`;
       }
-      // countQuery += ` AND approved_status = :approved`;
     }
     if (search_key) {
       countQuery += ` AND batch_name ILIKE '%${search_key}%' `;
@@ -291,8 +285,33 @@ const getRequests = async (req, res) => {
     const totalRecords = parseInt(countResult.count);
     const totalPages = Math.ceil(totalRecords / limit);
 
+    // For each record, check the DownloadVideos table
+    const recordsWithDownloadCount = await Promise.all(
+      records.map(async (record) => {
+        const downloadCountQuery = `
+          SELECT COUNT(*) AS download_count
+          FROM download_videos
+          WHERE batch_name = :batch_name
+            AND student_id = :student_id
+            AND requested_date = :requested_date
+        `;
+        const [downloadCountResult] = await sequelize.query(downloadCountQuery, {
+          replacements: {
+            batch_name: record.batch_name,
+            student_id: record.student_id,
+            requested_date: record.requested_date,
+          },
+          type: sequelize.QueryTypes.SELECT,
+        });
+        return {
+          ...record,
+          download_count: parseInt(downloadCountResult.download_count),
+        };
+      })
+    );
+
     res.status(200).json({
-      data: records,
+      data: recordsWithDownloadCount,
       totalRecords: totalRecords,
       totalPages: totalPages,
       currentPage: page,

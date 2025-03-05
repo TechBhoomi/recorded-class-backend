@@ -21,7 +21,7 @@ router.post('/get-video-files', getVideoFilesRoute);
 router.get('/get-video-status', getDownloadStatusRoute);
 // const { runManualCleanup } = require('../helpers/cron');
 
-// // Run a manual cleanup (useful for testing)
+// // Run a manual cleanup 
 // runManualCleanup().then(() => {
 //   console.log('Manual cleanup completed');  
 // });
