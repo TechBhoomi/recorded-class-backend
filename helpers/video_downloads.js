@@ -7,7 +7,13 @@ const { SortAndFilterDates, IsRequested } = require("../helpers/helper")
 
 EventEmitter.defaultMaxListeners = 20; 
 
-
+const recordServerConfig = {
+  host: "85.195.120.67",
+  user: "root",
+  password: "mGMXRsMTBxW7",
+  port: 22,
+  readyTimeout: 600000
+};
 
 const serverAConfig = {
   host: "92.204.168.59",
@@ -22,9 +28,9 @@ const serverBConfig = {
   password: "legend@123",
   port: 8787,
 };
-
+const recordServerDir = "/var/www/html/node_recorder/videos";
 const remoteDir = "/home/techreactive/var/www/html/videos/";
-const localDir = "/home/recorded-class-backend/public/videos/downloaded_videos/";
+const localDir = "/home/recorded-class-backend/public/videos/downloaded_videos";
 
 
 async function connectSFTP(config, serverName) {
@@ -47,68 +53,10 @@ async function connectSFTP(config, serverName) {
 
 
 
-async function transferFiles2(batch_name, date) {
-  const batchRemoteDir = path.join(String(remoteDir), String(batch_name));
-  const batchLocalDir = path.join(localDir, batch_name);
-
-  await fs.ensureDir(batchLocalDir);
-
-  let sftpA, sftpB;
-  try {
-    sftpA = await connectSFTP(serverAConfig, "Server A");
-    sftpB = await connectSFTP(serverBConfig, "Server B");
-
-    console.log(`Fetching file list from Server A: ${batchRemoteDir}`);
-
-    try {
-      const files = await sftpA.list(batchRemoteDir);
-      // console.log(files, "files-- --");
-
-      const dateFiles = files.filter(file => file.name.includes(date) && (file.name.endsWith(".webm") || file.name.endsWith(".mp4")));
-      const unavailableDates = []
-      const downloadedFiles = [];
-      console.log(dateFiles, "dateFiles");
-      if (dateFiles.length == 0) {
-        unavailableDates.push(date);
-      }
-      for (const file of dateFiles) {
-        const fileName = file.name;
-        const remoteFilePath = path.join(batchRemoteDir, fileName);
-        const localFilePath = path.join(batchLocalDir, fileName);
-
-        try {
-          console.log(`Downloading ${fileName} from Server A...`);
-          const downloadStart = Date.now();
-          await sftpA.fastGet(remoteFilePath, localFilePath);
-          const downloadEnd = Date.now();
-          console.log(`Downloaded ${fileName} (Time taken: ${(downloadEnd - downloadStart) / 1000} seconds)`);
-
-          downloadedFiles.push(fileName);
-        } catch (error) {
-          console.error(`Error transferring ${fileName}: ${error.message}`);
-        }
-      }
-
-      return { files: downloadedFiles || [], unavailableFiles: unavailableDates || [], error: null };
-    } catch (error) {
-      console.error('Error listing SFTP directory:', error.message);
-      return { files: [], unavailableFiles: [], error: error.message };
-    }
-
-  } catch (error) {
-    console.error(`Error processing batch ${batch_name} for ${date}: ${error.message}`);
-    return { files: [], unavailableFiles: [], error: error.message };
-  } finally {
-    console.log("Closing SFTP connections...");
-    if (sftpA) await sftpA.end();
-    if (sftpB) await sftpB.end();
-  }
-}
-
 const activeDownloads = new Map();
 
 async function transferFiles(batch_name, date) {
-  const batchRemoteDir = path.join(String(remoteDir), String(batch_name));
+  const batchRemoteDir = path.join(String(recordServerDir), String(batch_name));
   const batchLocalDir = path.join(localDir, batch_name);
 
   // Create a unique key for this batch and date combination
@@ -132,7 +80,7 @@ async function transferFiles(batch_name, date) {
     // Mark this download as active
     activeDownloads.set(downloadKey, new Date());
 
-    sftpA = await connectSFTP(serverAConfig, "Server A");
+    sftpA = await connectSFTP(recordServerConfig, "Server A");
     sftpB = await connectSFTP(serverBConfig, "Server B");
 
     console.log(`Fetching file list from Server A: ${batchRemoteDir}`);
@@ -265,4 +213,43 @@ console.log(downloadedFiles,"downloadedFiles");
     if (sftpA) await sftpA.end();
   }
 }
-module.exports = { serverAConfig,connectSFTP,transferFiles, fetchVideoDetails, checkActiveDownloads };
+async function fetchVideoDetails_RecordServer(batch_name, date) {
+  const batchRemoteDir = path.join(String(recordServerDir), String(batch_name));
+  const batchLocalDir = path.join(localDir, batch_name);
+
+  await fs.ensureDir(batchLocalDir);
+
+  let sftpA
+  try {
+    sftpA = await connectSFTP(recordServerConfig, "Server A");
+    console.log(`Fetching file list from Server A: ${batchRemoteDir}`);
+    try {
+      const files = await sftpA.list(batchRemoteDir);
+      const dateFiles = files.filter(file => 
+       file.name.includes(date));
+
+      const unavailableDates = []
+      const downloadedFiles = [];
+      if (dateFiles.length == 0) {
+        unavailableDates.push(date);
+      }else{
+        downloadedFiles.push(date)
+      }
+      console.log(downloadedFiles,"downloadedFiles");
+
+      return { files: downloadedFiles || [], unavailableFiles: unavailableDates || [], error: null };
+    } catch (error) {
+      // Log the specific error
+      console.error('Error listing SFTP directory:', error.message);
+      return { files: [], unavailableFiles: [], error: error.message };
+    }
+
+  } catch (error) {
+    console.error(`Error processing batch ${batch_name} for ${date}: ${error.message}`);
+    return { files: [], unavailableFiles: [], error: error.message };
+  } finally {
+    console.log("Closing SFTP connections...");
+    if (sftpA) await sftpA.end();
+  }
+}
+module.exports = { serverAConfig,connectSFTP,transferFiles, fetchVideoDetails,fetchVideoDetails_RecordServer,recordServerConfig, checkActiveDownloads };

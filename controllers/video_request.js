@@ -6,6 +6,8 @@ const SftpClient = require("ssh2-sftp-client");
 const { AbsentDateValidation } = require("./stream");
 const { log } = require("console");
 const { transferFiles, connectSFTP } = require("../helpers/video_downloads")
+const { fetchVideoDetails_RecordServer } = require("../helpers/video_downloads") 
+
 
 const video_request = async (req, res) => {
   try {
@@ -90,19 +92,50 @@ const video_request = async (req, res) => {
       if (result[requested_date].length === 0) {
         console.log("Object is empty");
         // approved_status = false;
+        const { files: downloadedFiles , unavailableFiles: unavailableDate , error } = await fetchVideoDetails_RecordServer(batch_name, requested_date);
+        
+        console.log(downloadedFiles, unavailableDate,"fetchVideoDetails_RecordServersfsdjfsdfsdfsjkgfkh");
+        // result[requested_date] = downloadedFiles
+        console.log(downloadedFiles.length === 0,"downloadedFiles.length === 0");
+        
+        if(downloadedFiles.length === 0 ){
+          const newDetails = {
+            reviewed_by: "auto",
+            reviewed_by_id: "-",
+            reject_reason: "No videos found for the requested date.",
+            reviewed_at: new Date().toISOString(),
+          };
+          const file_availability = {
+            is_available: false,
+            file_status: "Unavailable"
+          };
+          await AbsentRecord.update(
+            { is_inactive: true, approved_status: false, details: newDetails,file_availability: file_availability },
+            { where: { student_id, batch_name, requested_date, is_inactive: false } }
+          );
+        }else{
+          console.log("Processing ...available in main server , wait....");
+          const { files: downloadedFiles = [], unavailableFiles: unavailableDates = [], error } =await transferFiles(batch_name, requested_date);
 
-        const newDetails = {
-          reviewed_by: "auto",
-          reviewed_by_id: "-",
-          reject_reason: "No videos found for the requested date.",
-          reviewed_at: new Date().toISOString(),
-        };
-        await AbsentRecord.update(
-          { is_inactive: true, approved_status: false, details: newDetails },
+          const file_availability = {
+            is_available: false,
+            file_status: "Processing"
+          };
+          await AbsentRecord.update(
+          {file_availability: file_availability },
           { where: { student_id, batch_name, requested_date, is_inactive: false } }
         );
+        }
       } else {
-
+        console.log("video available in storage server ");
+        const file_availability = {
+          is_available: true,
+          file_status: "Available"
+        };
+        await AbsentRecord.update(
+        {file_availability: file_availability },
+        { where: { student_id, batch_name, requested_date, is_inactive: false } }
+      );
       }
 
     }
@@ -323,225 +356,5 @@ const getRequests = async (req, res) => {
   }
 };
 
-
-// 
-const remoteDir = "/home/techreactive/var/www/html/videos/";
-const localDir = "/home/recorded-class-backend/public/videos/downloaded_videos/";
-
-const serverAConfig = {
-  host: "92.204.168.59",
-  user: "root",
-  password: "uhMJ4WJmTFhF",
-  port: 22,
-  readyTimeout: 600000
-};
-// Optimized SFTP fetch function
-// Connection pool to reuse SFTP connections
-// const ConnectionPool = {
-//   connections: new Map(),
-//   async getConnection(config, serverName) {
-//     const key = `${config.host}:${config.port}`;
-//     let connection = this.connections.get(key);
-
-//     if (connection?.sftp) {
-//       try {
-//         // Test if connection is still alive
-//         await connection.sftp.list('/');
-//         return connection.sftp;
-//       } catch (error) {
-//         // Connection dead, remove it
-//         this.connections.delete(key);
-//       }
-//     }
-
-//     // Create new connection
-//     const sftp = new SftpClient();
-//     await this.connectWithRetry(sftp, config, serverName);
-
-//     this.connections.set(key, {
-//       sftp,
-//       lastUsed: Date.now()
-//     });
-
-//     return sftp;
-//   },
-
-//   async connectWithRetry(sftp, config, serverName) {
-//     let retries = 3;
-//     let lastError;
-
-//     while (retries > 0) {
-//       try {
-//         await sftp.connect(config);
-//         return;
-//       } catch (error) {
-//         lastError = error;
-//         retries--;
-//         if (retries > 0) {
-//           await new Promise(resolve => setTimeout(resolve, 1000));
-//         }
-//       }
-//     }
-//     throw lastError;
-//   },
-
-//   // Clean up old connections periodically
-//   cleanup() {
-//     const MAX_IDLE_TIME = 5 * 60 * 1000; // 5 minutes
-//     for (const [key, connection] of this.connections.entries()) {
-//       if (Date.now() - connection.lastUsed > MAX_IDLE_TIME) {
-//         connection.sftp.end();
-//         this.connections.delete(key);
-//       }
-//     }
-//   }
-// };
-
-// // Start cleanup interval
-// setInterval(() => ConnectionPool.cleanup(), 60000);
-
-// // Cache for video file listings
-// const FileListCache = {
-//   cache: new Map(),
-//   TTL: 5 * 60 * 1000, // 5 minutes
-
-//   set(key, value) {
-//     this.cache.set(key, {
-//       value,
-//       timestamp: Date.now()
-//     });
-//   },
-
-//   get(key) {
-//     const entry = this.cache.get(key);
-//     if (!entry) return null;
-//     if (Date.now() - entry.timestamp > this.TTL) {
-//       this.cache.delete(key);
-//       return null;
-//     }
-//     return entry.value;
-//   }
-// };
-
-// async function fetchVideoDetails(batch_name, date) {
-//   const cacheKey = `${batch_name}:${date}`;
-//   const cachedResult = FileListCache.get(cacheKey);
-//   if (cachedResult) {
-//     return cachedResult;
-//   }
-
-//   const batchRemoteDir = path.join(String(remoteDir), String(batch_name));
-
-//   try {
-//     const sftpA = await ConnectionPool.getConnection(serverAConfig, "Server A");
-//     const files = await sftpA.list(batchRemoteDir);
-//     const dateFiles = files.filter(file => file.name.includes(date));
-
-//     const result = {
-//       files: dateFiles,
-//       unavailableFiles: dateFiles.length ? [] : [date],
-//       error: null
-//     };
-
-//     FileListCache.set(cacheKey, result);
-//     return result;
-
-//   } catch (error) {
-//     console.error('SFTP Error:', error.message);
-//     return { files: [], unavailableFiles: [], error: error.message };
-//   }
-// }
-
-// // Optimize the video request handler to use batch operations
-// const video_request = async (req, res) => {
-//   try {
-//     const {
-//       student_id,
-//       batch_name,
-//       requested_date,
-//       active_videos = [],
-//       comment = '',
-//       name,
-//       contact,
-//       email
-//     } = req.body;
-
-//     if (!student_id || !batch_name || !requested_date ) {
-//       return res.status(400).json({ error: "Missing required fields." });
-//     }
-
-//     const currentDate = new Date().setHours(0, 0, 0, 0);
-//     const requestedDateObj = new Date(requested_date).setHours(0, 0, 0, 0);
-
-//     if (requestedDateObj > currentDate) {
-//       return res.status(400).json({ error: "Cannot request for future dates" });
-//     }
-
-//     const active_video_dates = [...new Set(
-//       active_videos.map(date => new Date(date).toISOString().split('T')[0])
-//     )];
-
-//     // Batch database operations
-//     const [existingRecord, localFiles] = await Promise.all([
-//       AbsentRecord.findOne({
-//         where: {
-//           student_id,
-//           batch_name,
-//           requested_date,
-//           is_inactive: false
-//         }
-//       }),
-//       fs.promises.readdir(path.resolve(process.env.VIDEO_PATH2, batch_name))
-//         .catch(() => [])
-//     ]);
-
-//     if (existingRecord) {
-//       return res.status(400).json({
-//         message: "Existing request found!",
-//         record: existingRecord,
-//       });
-//     }
-
-//     // Check local files first before SFTP
-//     const matchingLocalFiles = localFiles.filter(file =>
-//       file.includes(requested_date) && /\.(webm|mp4)$/.test(file)
-//     );
-
-//     let videoFiles;
-//     if (!matchingLocalFiles.length) {
-//       const { files: remoteFiles } = await fetchVideoDetails(batch_name, requested_date);
-//       videoFiles = remoteFiles;
-//     } else {
-//       videoFiles = matchingLocalFiles.map(file => ({ name: file }));
-//     }
-
-//     if (!videoFiles.length) {
-//       return res.status(404).json({
-//         message: `Video not available for the requested date: ${requested_date}`
-//       });
-//     }
-
-//     const newRecord = await AbsentRecord.create({
-//       student_id,
-//       batch_name,
-//       requested_date,
-//       video_details: {
-//         active_video_dates,
-//         requested_video_date: requested_date
-//       },
-//       student_details: { name, contact, email },
-//       comment
-//     });
-
-//     return res.status(200).json({
-//       message: "Request created successfully!",
-//       record: newRecord,
-//     });
-
-//   } catch (error) {
-//     console.error("Error:", error);
-//     res.status(500).json({ error: "Failed to add absent record." });
-//   }
-// };
 
 module.exports = { video_request, video_request_approve, getRequests };

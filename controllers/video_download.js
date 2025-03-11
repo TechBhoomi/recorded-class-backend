@@ -4,21 +4,118 @@ const { promisify } = require('util');
 const { exec } = require('child_process');
 const execPromise = promisify(exec);
 const moment = require('moment');
-const sequelize = require("../config/db"); // Adjust the path as necessary
-// Import your existing SFTP connection helper
-const { connectSFTP, serverAConfig } = require('../helpers/video_downloads');
-// Import the DownloadVideos model
+const sequelize = require("../config/db"); 
+const { connectSFTP, serverAConfig, recordServerConfig } = require('../helpers/video_downloads');
 const DownloadVideos = require('../models/download_videos');
+
+class InMemoryQueue {
+    constructor() {
+        this.queue = [];
+        this.processing = false;
+        this.keyMap = new Map(); // Track keys to avoid duplicates
+    }
+
+    async enqueue(key, task) {
+        // Check if this task is already in the queue or being processed
+        if (this.keyMap.has(key)) {
+            // Return existing promise for this key
+            return this.keyMap.get(key).promise;
+        }
+        
+        // Create a new promise for this task
+        const promiseData = {};
+        const promise = new Promise((resolve, reject) => {
+            promiseData.resolve = resolve;
+            promiseData.reject = reject;
+        });
+        
+        // Store the promise and resolvers
+        promiseData.promise = promise;
+        this.keyMap.set(key, promiseData);
+        
+        // Add to queue
+        this.queue.push({ key, task });
+        
+        // Start processing if not already in progress
+        if (!this.processing) {
+            this.processQueue();
+        }
+        
+        return promise;
+    }
+
+    async processQueue() {
+        if (this.processing) return;
+        
+        this.processing = true;
+        
+        while (this.queue.length > 0) {
+            const { key, task } = this.queue.shift();
+            
+            try {
+                const result = await task();
+                
+                // Resolve the promise for this task
+                const promiseData = this.keyMap.get(key);
+                if (promiseData && promiseData.resolve) {
+                    promiseData.resolve(result);
+                }
+            } catch (error) {
+                console.error(`Error processing task ${key}:`, error);
+                
+                // Reject the promise for this task
+                const promiseData = this.keyMap.get(key);
+                if (promiseData && promiseData.reject) {
+                    promiseData.reject(error);
+                }
+            } finally {
+                // Remove the key from the map after processing
+                this.keyMap.delete(key);
+            }
+        }
+        
+        this.processing = false;
+    }
+}
+
+// Create a singleton instance for DB locks across the application
+const dbLockManager = (() => {
+    const locks = new Map();
+    
+    return {
+        acquireLock: async (lockKey, timeoutMs = 10000) => {
+            const startTime = Date.now();
+            
+            while (locks.has(lockKey)) {
+                if (Date.now() - startTime > timeoutMs) {
+                    throw new Error(`Timeout waiting for lock: ${lockKey}`);
+                }
+                
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            
+            locks.set(lockKey, true);
+            return true;
+        },
+        
+        releaseLock: (lockKey) => {
+            locks.delete(lockKey);
+            return true;
+        }
+    };
+})();
+
 class EnhancedVideoFileManager {
-    constructor(remoteDir, localDir) {
+    constructor(remoteDir, localDir,recordDir) {
         this.remoteDir = remoteDir;
         this.localDir = localDir;
+        this.recordDir = recordDir;
         this.activeDownloads = new Map();
-        // Add a file lock map to track which files are currently being downloaded
         this.fileDownloadLocks = new Map();
-        // Add a new map to track download promises
         this.downloadPromises = new Map();
+        this.downloadQueue = new InMemoryQueue();
     }
+
     async getVideoDuration(filePath) {
         try {
             const cmd = `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`;
@@ -27,33 +124,33 @@ class EnhancedVideoFileManager {
             const hours = Math.floor(durationInSeconds / 3600);
             const minutes = Math.floor((durationInSeconds % 3600) / 60);
             const seconds = Math.round(durationInSeconds % 60);
+            
             return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
         } catch (error) {
             console.error(`Error getting video duration: ${error.message}`);
             return '00:00:00';
         }
     }
-    // Safe size getter handles different SFTP server formats
+
     getFileSize(file) {
-        // Different SFTP servers might store size in different properties
         if (file.attrs && typeof file.attrs.size !== 'undefined') {
             return file.attrs.size;
         } else if (typeof file.size !== 'undefined') {
             return file.size;
         } else {
             console.warn(`Size not found for file ${file.name}, using default`);
-            return 1000; // 1 KB default
+            return 1000; 
         }
     }
-    async checkFilesExistRemotely(batchName, date) {
+    async checkFilesExistRemotelyMain(batchName, date) {
+        // Implementation unchanged
         let sftpA = null;
         try {
-            const batchRemoteDir = path.join(String(this.remoteDir), String(batchName));
-            sftpA = await connectSFTP(serverAConfig, "Server A");
+            const batchRemoteDir = path.join(String(this.recordDir), String(batchName));
+            sftpA = await connectSFTP(recordServerConfig, "Server A");
 
             console.log(`Checking remote directory: ${batchRemoteDir}`);
 
-            // Check if directory exists first
             try {
                 const dirExists = await sftpA.exists(batchRemoteDir);
                 if (!dirExists) {
@@ -68,12 +165,6 @@ class EnhancedVideoFileManager {
             const files = await sftpA.list(batchRemoteDir);
             console.log(`Found ${files.length} files in remote directory`);
 
-            // Log first file to debug its structure
-            if (files && files.length > 0) {
-                console.log('First file structure:', JSON.stringify(files[0]));
-            }
-
-            // Filter files for the specific date with more detailed logging
             const dateFiles = files.filter(file => {
                 const matches = file.name.includes(date) &&
                     (file.name.endsWith('.webm') || file.name.endsWith('.mp4'));
@@ -101,161 +192,137 @@ class EnhancedVideoFileManager {
             }
         }
     }
+    async checkFilesExistRemotely(batchName, date) {
+        // Implementation unchanged
+        let sftpA = null;
+        try {
+            const batchRemoteDir = path.join(String(this.remoteDir), String(batchName));
+            sftpA = await connectSFTP(serverAConfig, "Server A");
+
+            console.log(`Checking remote directory: ${batchRemoteDir}`);
+
+            try {
+                const dirExists = await sftpA.exists(batchRemoteDir);
+                if (!dirExists) {
+                    console.error(`Remote directory ${batchRemoteDir} does not exist`);
+                    return { exists: false, files: [] };
+                }
+            } catch (dirError) {
+                console.error(`Error checking if directory exists: ${batchRemoteDir}`, dirError);
+                return { exists: false, files: [] };
+            }
+
+            const files = await sftpA.list(batchRemoteDir);
+            console.log(`Found ${files.length} files in remote directory`);
+
+            const dateFiles = files.filter(file => {
+                const matches = file.name.includes(date) &&
+                    (file.name.endsWith('.webm') || file.name.endsWith('.mp4'));
+
+                if (matches) {
+                    console.log(`Found matching file: ${file.name}`);
+                }
+                return matches;
+            });
+
+            console.log(`Found ${dateFiles.length} files matching date ${date}`);
+            return {
+                exists: dateFiles.length > 0,
+                files: dateFiles
+            };
+        } catch (error) {
+            console.error(`Error checking remote files for date ${date}:`, error);
+            return {
+                exists: false,
+                files: []
+            };
+        } finally {
+            if (sftpA) {
+                await sftpA.end();
+            }
+        }
+    }
+
     async downloadVideoForStudent(student_id, batchName, dates) {
         if (!Array.isArray(dates)) {
             dates = [dates];
         }
-
+    
         const results = [];
-        const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes threshold for stuck downloads
-
+        const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000; 
+    
         for (const date of dates) {
             try {
-                // Create a unique key for the concurrent request protection
+                const requestedDate = new Date(date);
+                const formattedDate = requestedDate.toISOString().split('T')[0] + ' 00:00:00+00';
+                console.log(formattedDate);
+    
                 const recordKey = `${student_id}_${batchName}_${date}`;
-
-                // If there's already a download promise for this key, wait for it
-                if (this.downloadPromises.has(recordKey)) {
-                    console.log(`Concurrent request detected for ${recordKey}, waiting for existing operation to complete`);
+                
+                // Use our queue system
+                const result = await this.downloadQueue.enqueue(recordKey, async () => {
+                    // Acquire a database lock for this specific combination
+                    const dbLockKey = `db_lock_${recordKey}`;
+                    await dbLockManager.acquireLock(dbLockKey);
+                    
                     try {
-                        await this.downloadPromises.get(recordKey);
-                    } catch (err) {
-                        console.error(`Error waiting for existing promise for ${recordKey}:`, err);
-                        // Continue with the process even if the previous promise failed
-                    }
-                }
-
-                // Create a new promise for this operation
-                const downloadPromise = (async () => {
-                    let downloadRecord;
-
-                    // Using a transaction to ensure data consistency
-                    const result = await sequelize.transaction(async (t) => {
-                        // First check if any active record exists with this criteria
-                        // that is either pending or in progress (not completed or failed)
-                        const existingRecord = await DownloadVideos.findOne({
-                            where: {
-                                student_id,
-                                batch_name: batchName,
-                                requested_date: date,
-                                delete_status: false,
-                                download_status: ['pending', 'in_progress'] // Only consider pending or in_progress records
-                            },
-                            lock: true, // This translates to FOR UPDATE
-                            transaction: t
-                        });
-
-                        // Log if a record was found for debugging
-                        if (existingRecord) {
-                            console.log(`Found existing active record ${existingRecord.id} for ${recordKey}`);
-
-                            // Check for stuck downloads
-                            if (existingRecord.download_status === 'in_progress' || existingRecord.download_status === 'pending') {
-                                console.log("hhhhhhhhhhhhhhhh");
-
-                                let fileDetails = existingRecord.file_details || [];
-                                let hasStuckFiles = false;
-                                const currentTime = new Date().getTime();
-
-                                // Reset downloads that have been stuck for over 30 minutes
-                                fileDetails = fileDetails.map(file => {
-                                    if (file.status === 'downloading') {
-                                        const downloadStartTime = file.download_start ? new Date(file.download_start).getTime() : 0;
-                                        console.log(downloadStartTime, currentTime - downloadStartTime, DOWNLOAD_TIMEOUT_MS, "hhhhhhhhhhffffffffff");
-
-                                        if (downloadStartTime > 0 && (currentTime - downloadStartTime) > DOWNLOAD_TIMEOUT_MS) {
-                                            console.log(`Resetting stuck download for file ${file.name} - stuck for ${(currentTime - downloadStartTime) / 60000} minutes`);
-                                            hasStuckFiles = true;
-                                            return {
-                                                ...file,
-                                                status: 'pending',
-                                                download_start: null,
-                                                error: file.error ? `Previous attempt timed out: ${file.error}` : 'Previous download attempt timed out'
-                                            };
-                                        }
-                                    }
-                                    return file;
-                                });
-
-                                // Update the record if we found and reset stuck files
-                                if (hasStuckFiles) {
-                                    console.log("kkkkkkkkkkkkkkkkkkkkkkk");
-
-                                    await existingRecord.update({
-                                        file_details: fileDetails,
-                                        details: {
-                                            ...existingRecord.details,
-                                            stuck_files_reset_at: new Date()
-                                        }
-                                    }, { transaction: t });
-
-                                    console.log(`Reset stuck downloads for record ${existingRecord.id}`);
-                                }
-                            }
-
-                            downloadRecord = existingRecord;
-                        } else {
-                            // Check if we have a completed or failed record that is not deleted
-                            const existingCompletedRecord = await DownloadVideos.findOne({
+                        // Use a transaction to prevent race conditions at the database level
+                        return await sequelize.transaction(async (t) => {
+                            let downloadRecord;
+                        
+                            // Find existing record - now with transaction
+                            const existingRecord = await DownloadVideos.findOne({
                                 where: {
                                     student_id,
                                     batch_name: batchName,
-                                    requested_date: date,
-                                    delete_status: false,
-                                    download_status: ['completed', 'failed']
+                                    requested_date: formattedDate,
+                                    delete_status: false
                                 },
-                                lock: true,
-                                transaction: t
+                                transaction: t,
+                                lock: t.LOCK.UPDATE // Use row-level locking
                             });
-
-                            if (existingCompletedRecord) {
-                                // Reuse the completed/failed record and reset it if needed
-                                downloadRecord = existingCompletedRecord;
-                                console.log(`Reusing existing ${downloadRecord.download_status} record ${downloadRecord.id}`);
-
-                                // Reset the record status to pending for a retry
-                                if (downloadRecord.download_status === 'failed') {
-                                    // Reset file statuses to pending for failed files
-                                    let fileDetails = downloadRecord.file_details || [];
+                            
+                            if (existingRecord) {
+                                console.log(`Found existing active record ${existingRecord.id} for ${recordKey}`);
+                
+                                if (existingRecord.download_status === 'in_progress' || existingRecord.download_status === 'pending') {
+                                    let fileDetails = existingRecord.file_details || [];
+                                    let hasStuckFiles = false;
+                                    const currentTime = new Date().getTime();
+                
                                     fileDetails = fileDetails.map(file => {
-                                        if (file.status === 'failed') {
-                                            return {
-                                                ...file,
-                                                status: 'pending',
-                                                download_start: null,
-                                                download_end: null,
-                                                error: null
-                                            };
+                                        if (file.status === 'downloading') {
+                                            const downloadStartTime = file.download_start ? new Date(file.download_start).getTime() : 0;
+                
+                                            if (downloadStartTime > 0 && (currentTime - downloadStartTime) > DOWNLOAD_TIMEOUT_MS) {
+                                                console.log(`Resetting stuck download for file ${file.name} - stuck for ${(currentTime - downloadStartTime) / 60000} minutes`);
+                                                hasStuckFiles = true;
+                                                return {
+                                                    ...file,
+                                                    status: 'pending',
+                                                    download_start: null,
+                                                    error: file.error ? `Previous attempt timed out: ${file.error}` : 'Previous download attempt timed out'
+                                                };
+                                            }
                                         }
                                         return file;
                                     });
-
-                                    await downloadRecord.update({
-                                        download_status: 'pending',
-                                        file_details: fileDetails,
-                                        details: {
-                                            ...downloadRecord.details,
-                                            retry_at: new Date()
-                                        }
-                                    }, { transaction: t });
-
-                                    console.log(`Reset failed/partial record ${downloadRecord.id} to pending for retry`);
+                
+                                    if (hasStuckFiles) {
+                                        await existingRecord.update({
+                                            file_details: fileDetails,
+                                            details: {
+                                                ...existingRecord.details,
+                                                stuck_files_reset_at: new Date()
+                                            }
+                                        }, { transaction: t });
+                                        console.log(`Reset stuck downloads for record ${existingRecord.id}`);
+                                    }
                                 }
+                
+                                downloadRecord = existingRecord;
                             } else {
-                                // Check for deleted records that can be reactivated
-                                // const deletedRecord = await DownloadVideos.findOne({
-                                //     where: {
-                                //         student_id,
-                                //         batch_name: batchName,
-                                //         requested_date: date,
-                                //         delete_status: true,
-                                //         download_status: ['completed', 'failed']
-                                //     },
-                                //     lock: true,
-                                //     transaction: t
-                                // });
-
-                                // if (deletedRecord) {
+                                // Create new record if none exists - now with transaction
                                 downloadRecord = await DownloadVideos.create({
                                     student_id,
                                     type: 'video',
@@ -267,154 +334,233 @@ class EnhancedVideoFileManager {
                                     file_details: [],
                                     details: {}
                                 }, { transaction: t });
-                                // Reactivate the deleted record
-                                // downloadRecord = deletedRecord;
-                                // await downloadRecord.update({
-                                //     delete_status: false,
-                                //     download_status: 'pending',
-                                //     active_upto: moment().add(7, 'days').toDate(),
-                                //     file_details: [],
-                                //     details: {
-                                //         reactivated_at: new Date()
-                                //     }
-                                // }, { transaction: t });
-
-                                console.log(`new row for deleted record ${downloadRecord.id} for ${recordKey}`);
-                                // } else {
-                                // No record exists at all, create a new one
-                                // downloadRecord = await DownloadVideos.create({
-                                //     student_id,
-                                //     type: 'video',
-                                //     batch_name: batchName,
-                                //     requested_date: date,
-                                //     download_status: 'pending',
-                                //     delete_status: false,
-                                //     active_upto: moment().add(7, 'days').toDate(),
-                                //     file_details: [],
-                                //     details: {}
-                                // }, { transaction: t });
-
-                                // console.log(`Created new download record  for ${recordKey}`);
-                                // }
+                                console.log(`Created new record ${downloadRecord.id} for ${recordKey}`);
                             }
-                        }
-
-                        return downloadRecord;
-                    });
-
-                    // Continue with the process outside the transaction
-                    downloadRecord = result;
-
-                    // If already completed, just return the record
-                    if (downloadRecord.download_status === 'completed') {
-                        results.push({
-                            date,
-                            status: 'already_downloaded',
-                            record_id: downloadRecord.id,
-                            files: downloadRecord.file_details
-                        });
-                        return; // Exit the promise function
-                    }
-
-                    // Check if files exist remotely
-                    const remoteCheck = await this.checkFilesExistRemotely(batchName, date);
-
-                    if (!remoteCheck.exists) {
-                        await downloadRecord.update({
-                            download_status: 'failed',
-                            details: {
-                                error: 'No videos found for this date',
-                                checked_at: new Date()
+                
+                            if (downloadRecord.download_status === 'completed') {
+                                return {
+                                    date,
+                                    status: 'already_downloaded',
+                                    record_id: downloadRecord.id,
+                                    files: downloadRecord.file_details
+                                };
                             }
-                        });
-
-                        results.push({
-                            date,
-                            status: 'failed',
-                            error: 'No videos found',
-                            record_id: downloadRecord.id
-                        });
-                        return; // Exit the promise function
-                    }
-
-                    // Process file_details
-                    let fileDetails = downloadRecord.file_details || [];
-                    fileDetails = JSON.parse(JSON.stringify(fileDetails));
-
-                    const existingFiles = new Set(fileDetails.map(f => f.name));
-                    const newFiles = remoteCheck.files.filter(file => !existingFiles.has(file.name));
-
-                    if (newFiles.length > 0) {
-                        // Add new files to file_details
-                        newFiles.forEach(file => {
-                            fileDetails.push({
-                                name: file.name,
-                                size: this.getFileSize(file),
-                                status: 'pending',
-                                download_start: null,
-                                download_end: null,
-                                error: null
-                            });
-                        });
-                    }
-
-                    // Update the record with new file details if needed
-                    const hasPendingFiles = fileDetails.some(file => file.status === 'pending');
-
-                    if (newFiles.length > 0 || hasPendingFiles) {
-                        await downloadRecord.update({
-                            download_status: 'in_progress',
-                            file_details: fileDetails
-                        });
-
-                        console.log(`Updated record status to in_progress with ${fileDetails.length} files`);
-                    }
-
-                    // Start async download process
-                    const downloadKey = `${student_id}_${batchName}_${date}`;
-
-                    if (!this.activeDownloads.has(downloadKey)) {
-                        this.activeDownloads.set(downloadKey, true);
-
-                        const pendingFiles = fileDetails.filter(f => f.status === 'pending');
-
-                        if (pendingFiles.length > 0) {
-                            console.log(`Starting download process for ${pendingFiles.length} pending files`);
-                            this.processDownload(downloadRecord.id, batchName, date, fileDetails, downloadKey)
-                                .catch(err => {
-                                    console.error(`Error in background download process for ${downloadKey}:`, err);
-                                    this.activeDownloads.delete(downloadKey);
+                
+                            // Rest of the implementation remains largely the same
+                            const remoteCheck = await this.checkFilesExistRemotely(batchName, date);
+                            const remoteMainCheck = await this.checkFilesExistRemotelyMain(batchName, date);
+                            if (!remoteCheck.exists && !remoteMainCheck) {
+                                await downloadRecord.update({
+                                    download_status: 'failed',
+                                    details: {
+                                        error: 'No videos found for this date',
+                                        checked_at: new Date()
+                                    }
+                                }, { transaction: t });
+                
+                                return {
+                                    date,
+                                    status: 'failed',
+                                    error: 'No videos found',
+                                    record_id: downloadRecord.id
+                                };
+                            }
+                
+                            // Process file_details
+                            let fileDetails = downloadRecord.file_details || [];
+                            fileDetails = JSON.parse(JSON.stringify(fileDetails));
+                
+                            const existingFiles = new Set(fileDetails.map(f => f.name));
+                            const newFiles = remoteCheck.files.filter(file => !existingFiles.has(file.name));
+                            const newFiles2 = remoteMainCheck.files.filter(file => !existingFiles.has(file.name));
+                            console.log(newFiles,newFiles2,"sddasfffff");
+                            if (newFiles.length > 0) {
+                                // Check if files exist locally before adding to pending queue
+                                const batchLocalDir = path.join(String(this.localDir), String(batchName));
+                                
+                                for (const file of newFiles) {
+                                    const localFilePath = path.join(batchLocalDir, file.name);
+                                    
+                                    // Check if file already exists locally
+                                    let fileExists = false;
+                                    try {
+                                        const stats = await fs.promises.stat(localFilePath);
+                                        // If file exists with similar size, consider it downloaded
+                                        if (stats.size > 0 && Math.abs(stats.size - this.getFileSize(file)) < 1024) {
+                                            fileExists = true;
+                                            console.log(`File ${file.name} already exists locally with correct size`);
+                                            
+                                            // Get video duration if it's a video file
+                                            let duration = "00:00:00";
+                                            if (file.name.endsWith('.webm') || file.name.endsWith('.mp4')) {
+                                                try {
+                                                    duration = await this.getVideoDuration(localFilePath);
+                                                } catch (err) {
+                                                    console.warn(`Failed to get duration for ${file.name}: ${err.message}`);
+                                                }
+                                            }
+                                            
+                                            // Add it as already completed
+                                            fileDetails.push({
+                                                name: file.name,
+                                                size: stats.size,
+                                                status: 'completed',
+                                                download_start: new Date(),
+                                                download_end: new Date(),
+                                                error: null,
+                                                duration: duration
+                                            });
+                                        }
+                                    } catch (err) {
+                                        // File doesn't exist, will be added to download queue
+                                        fileExists = false;
+                                    }
+                                    
+                                    // Only add to pending if file doesn't exist locally
+                                    if (!fileExists) {
+                                        fileDetails.push({
+                                            name: file.name,
+                                            size: this.getFileSize(file),
+                                            status: 'pending',
+                                            download_start: null,
+                                            download_end: null,
+                                            error: null
+                                        });
+                                    }
+                                }
+                            }else if (newFiles2.length > 0) {
+                                // Check if files exist locally before adding to pending queue
+                                const batchLocalDir = path.join(String(this.localDir), String(batchName));
+                                
+                                for (const file of newFiles2) {
+                                    const localFilePath = path.join(batchLocalDir, file.name);
+                                    
+                                    // Check if file already exists locally
+                                    let fileExists = false;
+                                    try {
+                                        const stats = await fs.promises.stat(localFilePath);
+                                        // If file exists with similar size, consider it downloaded
+                                        if (stats.size > 0 && Math.abs(stats.size - this.getFileSize(file)) < 1024) {
+                                            fileExists = true;
+                                            console.log(`File ${file.name} already exists locally with correct size`);
+                                            
+                                            // Get video duration if it's a video file
+                                            let duration = "00:00:00";
+                                            if (file.name.endsWith('.webm') || file.name.endsWith('.mp4')) {
+                                                try {
+                                                    duration = await this.getVideoDuration(localFilePath);
+                                                } catch (err) {
+                                                    console.warn(`Failed to get duration for ${file.name}: ${err.message}`);
+                                                }
+                                            }
+                                            
+                                            // Add it as already completed
+                                             fileDetails.push({
+                                                name: file.name,
+                                                size: stats.size,
+                                                status: 'completed',
+                                                download_start: new Date(),
+                                                download_end: new Date(),
+                                                error: null,
+                                                duration: duration
+                                            });
+                                        }
+                                    } catch (err) {
+                                        // File doesn't exist, will be added to download queue
+                                        fileExists = false;
+                                    }
+                                    console.log(fileExists,"fileExists");
+                                    
+                                    // Only add to pending if file doesn't exist locally
+                                    if (!fileExists) {
+                                        fileDetails.push({
+                                            name: file.name,
+                                            size: this.getFileSize(file),
+                                            status: 'pending',
+                                            download_start: null,
+                                            download_end: null,
+                                            error: null
+                                        });
+                                    }
+                                }
+                            }
+                            const hasPendingFiles = fileDetails.some(file => file.status === 'pending');
+                            const allFilesComplete = fileDetails.every(file => file.status === 'completed');
+                            if (allFilesComplete) {
+                                await downloadRecord.update({
+                                    download_status: 'completed',
+                                    file_details: fileDetails
+                                }, { transaction: t });
+                                
+                                console.log(`All files completed for record ${downloadRecord.id}`);
+                                
+                                return {
+                                    date,
+                                    status: 'completed',
+                                    record_id: downloadRecord.id,
+                                    files: fileDetails
+                                };
+                            }else if (newFiles.length > 0 || newFiles2.length > 0 || hasPendingFiles) {
+                                // Keep existing logic for in-progress status
+                                await downloadRecord.update({
+                                    download_status: 'in_progress',
+                                    file_details: fileDetails
+                                }, { transaction: t });
+                            
+                                console.log(`Updated record status to in_progress with ${fileDetails.length} files`);
+                            }
+                            // Update the record with new file details if needed
+                            
+                
+                            // if (newFiles.length > 0 || newFiles2.length > 0 || hasPendingFiles) {
+                            //     await downloadRecord.update({
+                            //         download_status: 'in_progress',
+                            //         file_details: fileDetails
+                            //     }, { transaction: t });
+                
+                            //     console.log(`Updated record status to in_progress with ${fileDetails.length} files`);
+                            // }
+                
+                            const pendingFiles = fileDetails.filter(f => f.status === 'pending');
+                
+                            // Schedule background process
+                            if (pendingFiles.length > 0) {
+                                console.log(`Starting download process for ${pendingFiles.length} pending files`);
+                                // Use a separate function to avoid waiting for the entire process
+                                // Start this AFTER the transaction completes
+                                setImmediate(() => {
+                                    this.processDownload(downloadRecord.id, batchName, date, fileDetails, recordKey)
+                                        .catch(err => {
+                                            console.error(`Error in background download process for ${recordKey}:`, err);
+                                        });
                                 });
-                        } else {
-                            await this.updateOverallStatus(downloadRecord.id);
-                            this.activeDownloads.delete(downloadKey);
-                            console.log(`No pending files to download, updated status for record ${downloadRecord.id}`);
-                        }
-                    } else {
-                        console.log(`Download process already active for key ${downloadKey}`);
+                            } else {
+                                // Update overall status - this can be done outside the transaction
+                                setImmediate(() => {
+                                    this.updateOverallStatus(downloadRecord.id)
+                                        .catch(err => {
+                                            console.error(`Error updating status for ${recordKey}:`, err);
+                                        });
+                                });
+                                console.log(`No pending files to download, scheduled status update for record ${downloadRecord.id}`);
+                            }
+                            return {
+                                date,
+                                status: 'download_started',
+                                record_id: downloadRecord.id,
+                                file_count: fileDetails.length,
+                                new_files: newFiles.length,
+                                pending_files: fileDetails.filter(f => f.status === 'pending').length,
+                                local_files: fileDetails.filter(f => f.status === 'completed').length
+                            };
+                        });
+                    } finally {
+                        // Always release the lock
+                        dbLockManager.releaseLock(dbLockKey);
                     }
-
-                    results.push({
-                        date,
-                        status: 'download_started',
-                        record_id: downloadRecord.id,
-                        file_count: fileDetails.length,
-                        new_files: newFiles.length,
-                        pending_files: fileDetails.filter(f => f.status === 'pending').length
-                    });
-                })();
-
-                // Store the promise in the map and clean it up when done
-                this.downloadPromises.set(recordKey, downloadPromise);
-
-                try {
-                    await downloadPromise;
-                } finally {
-                    // Clean up the promise reference
-                    if (this.downloadPromises.get(recordKey) === downloadPromise) {
-                        this.downloadPromises.delete(recordKey);
-                    }
-                }
+                });
+                
+                results.push(result);
             } catch (error) {
                 console.error(`Error initiating download for date ${date}:`, error);
                 results.push({
@@ -424,396 +570,203 @@ class EnhancedVideoFileManager {
                 });
             }
         }
-
-        return {
-            success: true,
-            student_id,
-            batch_name: batchName,
-            results
-        };
+        
+        return results;
     }
-    // Update status for all matching records that have this file
-    async updateAllRecordsWithFile(batchName, fileName, fileStatus, duration = null, fileSize = null) {
+
+    async processDownload(recordId, batchName, date, fileDetails, recordKey) {
         try {
-            console.log(`Updating all records with file ${fileName} to status ${fileStatus}`);
-
-            // Find all records with this batch and file name that are not deleted
-            const records = await DownloadVideos.findAll({
-                where: {
-                    batch_name: batchName,
-                    delete_status: false
-                }
-            });
-            console.log(`Found ${records.length} records for batch ${batchName}`);
-            for (const record of records) {
-                let updated = false;
-                // Make sure file_details is an array
-                const fileDetails = Array.isArray(record.file_details) ?
-                    JSON.parse(JSON.stringify(record.file_details)) : [];
-                // Find this file in the record's file_details
-                for (let i = 0; i < fileDetails.length; i++) {
-                    if (fileDetails[i].name === fileName) {
-                        console.log(`Updating file ${fileName} in record ${record.id} from status ${fileDetails[i].status} to ${fileStatus}`);
-
-                        // Update the file status
-                        fileDetails[i].status = fileStatus;
-                        // Update timestamp based on status
-                        if (fileStatus === 'completed') {
-                            fileDetails[i].download_end = new Date();
-                            if (!fileDetails[i].download_start) {
-                                fileDetails[i].download_start = new Date();
-                            }
-                            if (duration) fileDetails[i].duration = duration;
-                            if (fileSize) fileDetails[i].size = fileSize;
-                        } else if (fileStatus === 'failed') {
-                            fileDetails[i].download_end = new Date();
-                        } else if (fileStatus === 'downloading' && !fileDetails[i].download_start) {
-                            fileDetails[i].download_start = new Date();
-                        }
-                        updated = true;
-                    }
-                }
-                if (updated) {
-                    // Update the record with the modified file_details
-                    try {
-                        await record.update({ file_details: fileDetails });
-                        console.log(`Updated file_details for record ${record.id}`);
-
-                        // Update the overall status of this record
-                        await this.updateOverallStatus(record.id);
-                    } catch (updateError) {
-                        console.error(`Error updating record ${record.id}:`, updateError);
-                    }
-                }
-            }
-        } catch (error) {
-            console.error(`Error updating all records with file ${fileName}:`, error);
-        }
-    }
-    async updateOverallStatus(recordId) {
-        try {
-            const downloadRecord = await DownloadVideos.findByPk(recordId);
-            if (!downloadRecord) {
-                console.error(`Record ${recordId} not found`);
+            console.log(`Starting background download process for record ${recordId}`);
+            const pendingFiles = fileDetails.filter(f => f.status === 'pending');
+            
+            if (pendingFiles.length === 0) {
+                console.log(`No pending files found for record ${recordId}`);
+                await this.updateOverallStatus(recordId);
                 return;
             }
-            // Make sure file_details is an array
-            const fileDetails = Array.isArray(downloadRecord.file_details) ?
-                downloadRecord.file_details : [];
-            // Check overall status
-            const allCompleted = fileDetails.every(file => file.status === 'completed');
-            const anyFailed = fileDetails.some(file => file.status === 'failed');
-            const anyDownloading = fileDetails.some(file => file.status === 'downloading');
-            const anyPending = fileDetails.some(file => file.status === 'pending');
-            let finalStatus;
-            if (allCompleted) {
-                finalStatus = 'completed';
-            } else if (anyFailed) {
-                if (fileDetails.some(file => file.status === 'completed')) {
-                    if (anyDownloading || anyPending) {
-                        finalStatus = 'in_progress';
-                    }
-                    // else {
-                    //                         finalStatus = 'partially_completed';
-                    //                     }
-                } else {
-                    finalStatus = 'failed';
-                }
-            } else if (anyDownloading || anyPending) {
-                finalStatus = 'in_progress';
-            } else {
-                finalStatus = 'completed';
-            }
-            // Update final status
-            await downloadRecord.update({
-                download_status: finalStatus,
-                details: {
-                    last_updated_at: new Date(),
-                    success_count: fileDetails.filter(f => f.status === 'completed').length,
-                    failed_count: fileDetails.filter(f => f.status === 'failed').length,
-                    pending_count: fileDetails.filter(f => f.status === 'pending').length,
-                    downloading_count: fileDetails.filter(f => f.status === 'downloading').length,
-                    total_count: fileDetails.length
-                }
-            });
-
-            console.log(`Updated overall status for record ${recordId} to ${finalStatus}`);
-        } catch (error) {
-            console.error(`Error updating status for record ${recordId}:`, error);
-        }
-    }
-    async processDownload(recordId, batchName, date, fileDetails, downloadKey) {
-        let sftpA = null;
-
-        try {
-            console.log(`Starting download process for record ${recordId}`);
-
-            // Get the download record
-            const downloadRecord = await DownloadVideos.findByPk(recordId);
-            if (!downloadRecord) {
-                console.error(`Download record ${recordId} not found`);
-                this.activeDownloads.delete(downloadKey);
-                return;
-            }
-
-            // Get student ID for student-specific paths
-            const student_id = downloadRecord.student_id;
-
-            // Convert all path components to strings to avoid type errors 
+            
             const localDirStr = String(this.localDir);
             const batchNameStr = String(batchName);
-
-            // Create student-specific download directory path
             const studentDownloadDir = path.join(localDirStr, batchNameStr);
-
-            // Ensure directory exists
+            
+            // Make sure directory exists
             await fs.promises.mkdir(studentDownloadDir, { recursive: true });
-
-            // Log directory for debugging
-            console.log(`Created download directory: ${studentDownloadDir}`);
-
-            // Make sure we're working with the most current file details
-            const currentRecord = await DownloadVideos.findByPk(recordId);
-            const currentFileDetails = currentRecord.file_details || [];
-
-            // Process each pending file one by one
-            const pendingFiles = currentFileDetails.filter(f => f.status === 'pending');
-            console.log(`Found ${pendingFiles.length} pending files to download for record ${recordId}`);
-
-            if (pendingFiles.length === 0) {
-                console.log(`No pending files to download for record ${recordId}`);
-                this.activeDownloads.delete(downloadKey);
-                return;
-            }
-
-            // Connect to SFTP once for all files
-            sftpA = await connectSFTP(serverAConfig, "Server A");
-
-            for (const file of pendingFiles) {
-                try {
-                    // Update file status to downloading in database
-                    await this.updateFileStatus(recordId, file.name, 'downloading');
-
-                    // Convert all path components to strings
-                    const remoteDirStr = String(this.remoteDir);
-                    const fileNameStr = String(file.name);
-
-                    // Generate source and destination paths with explicit string conversion
-                    const remoteSourcePath = path.join(remoteDirStr, batchNameStr, fileNameStr);
-                    const localDestPath = path.join(studentDownloadDir, fileNameStr);
-
-                    console.log(`Downloading file from ${remoteSourcePath} to ${localDestPath}`);
-
+            
+            // Establish SFTP connection
+            const sftpA = await connectSFTP(serverAConfig, "Server A");
+            const batchRemoteDir = path.join(String(this.remoteDir), String(batchName));
+            
+            try {
+                // Process each pending file sequentially
+                for (const file of pendingFiles) {
+                    const fileKey = `${recordKey}_${file.name}`;
+                    
+                    // Skip if already being downloaded
+                    if (this.fileDownloadLocks.has(fileKey)) {
+                        console.log(`File ${file.name} is already being downloaded, skipping`);
+                        continue;
+                    }
+                    
+                    this.fileDownloadLocks.set(fileKey, true);
+                    
                     try {
-                        // Use SFTP fastGet to download the file directly
-                        await sftpA.fastGet(remoteSourcePath, localDestPath);
-                        console.log(`Successfully downloaded file ${fileNameStr}`);
-                    } catch (sftpError) {
-                        throw new Error(`Failed to download file from server: ${sftpError.message}`);
-                    }
-
-                    // Get file details
-                    const fileStats = await fs.promises.stat(localDestPath);
-                    const fileSize = fileStats.size;
-
-                    // Get video duration if it's a valid video file
-                    let duration = "00:00:00";
-                    if (fileSize > 0 && (fileNameStr.endsWith('.webm') || fileNameStr.endsWith('.mp4'))) {
-                        try {
-                            duration = await this.getVideoDuration(localDestPath);
-                        } catch (durationErr) {
-                            console.warn(`Failed to get duration for ${fileNameStr}: ${durationErr.message}`);
+                        const localFilePath = path.join(studentDownloadDir, file.name);
+                        const remoteFilePath = path.join(batchRemoteDir, file.name);
+                        
+                        // Update file status to downloading
+                        await this.updateFileStatus(recordId, file.name, {
+                            status: 'downloading',
+                            download_start: new Date()
+                        });
+                        
+                        console.log(`Downloading file ${file.name} from ${remoteFilePath} to ${localFilePath}`);
+                        
+                        // Download the file
+                        await sftpA.fastGet(remoteFilePath, localFilePath);
+                        
+                        // Get video duration if it's a video file
+                        let duration = "00:00:00";
+                        if (file.name.endsWith('.webm') || file.name.endsWith('.mp4')) {
+                            try {
+                                duration = await this.getVideoDuration(localFilePath);
+                            } catch (durationErr) {
+                                console.warn(`Failed to get duration for ${file.name}: ${durationErr.message}`);
+                            }
                         }
+                        
+                        // Get file size
+                        const stats = await fs.promises.stat(localFilePath);
+                        
+                        // Update file status to completed
+                        await this.updateFileStatus(recordId, file.name, {
+                            status: 'completed',
+                            download_end: new Date(),
+                            size: stats.size,
+                            duration: duration
+                        });
+                        
+                        console.log(`Successfully downloaded file ${file.name}`);
+                    } catch (fileError) {
+                        console.error(`Error downloading file ${file.name}:`, fileError);
+                        
+                        // Update file status to failed
+                        await this.updateFileStatus(recordId, file.name, {
+                            status: 'failed',
+                            error: fileError.message
+                        });
+                    } finally {
+                        this.fileDownloadLocks.delete(fileKey);
                     }
-
-                    // Update file status to completed in database
-                    await this.updateFileStatus(recordId, fileNameStr, 'completed', {
-                        download_end: new Date(),
-                        size: fileSize,
-                        duration
-                    });
-
-                    console.log(`Successfully processed ${fileNameStr} for record ${recordId}`);
-                } catch (fileError) {
-                    console.error(`Error downloading ${file.name} for record ${recordId}:`, fileError);
-
-                    // Mark as failed in database
-                    await this.updateFileStatus(recordId, file.name, 'failed', {
-                        download_end: new Date(),
-                        error: fileError.message
-                    });
                 }
+            } finally {
+                // Close SFTP connection
+                await sftpA.end();
             }
-
+            
             // Update overall status
             await this.updateOverallStatus(recordId);
         } catch (error) {
-            console.error(`Error in processDownload for record ${recordId}:`, error);
-        } finally {
-            // Close SFTP connection
-            if (sftpA) {
-                try {
-                    await sftpA.end();
-                } catch (closeError) {
-                    console.error('Error closing SFTP connection:', closeError);
+            console.error(`Error in download process for record ${recordId}:`, error);
+            
+            // Update record status to failed
+            await DownloadVideos.update({
+                download_status: 'failed',
+                details: {
+                    error: error.message,
+                    failed_at: new Date()
                 }
-            }
-
-            // Always clean up the active download flag
-            this.activeDownloads.delete(downloadKey);
+            }, {
+                where: { id: recordId }
+            });
         }
     }
-
-    // Helper method to update file status
-    async updateFileStatus(recordId, fileName, status, additionalData = {}) {
-        try {
-            // Always get fresh data from database
-            const record = await DownloadVideos.findByPk(recordId);
-            if (!record) {
-                console.error(`Record ${recordId} not found for updating file status`);
-                return;
-            }
-
-            // Make sure file_details is an array
-            let fileDetails = Array.isArray(record.file_details) ?
-                JSON.parse(JSON.stringify(record.file_details)) : [];
-
-            // Flag to check if any file was actually updated
-            let fileUpdated = false;
-
-            // Update the specific file
-            fileDetails = fileDetails.map(file => {
-                if (file.name === fileName) {
-                    fileUpdated = true;
-
-                    // Add timestamps based on status
-                    let fileData = { ...file, status };
-
-                    if (status === 'downloading' && !file.download_start) {
-                        fileData.download_start = new Date();
-                    } else if (status === 'completed' || status === 'failed') {
-                        fileData.download_end = new Date();
-                    }
-
-                    return { ...fileData, ...additionalData };
-                }
-                return file;
+    
+    async updateFileStatus(recordId, fileName, updates) {
+        // Use a transaction for this update to prevent race conditions
+        return await sequelize.transaction(async (t) => {
+            const record = await DownloadVideos.findByPk(recordId, { 
+                transaction: t,
+                lock: t.LOCK.UPDATE
             });
-
-            if (fileUpdated) {
-                // Log the update
-                console.log(`Updating file ${fileName} in record ${recordId} to status ${status}`);
-
-                // Update the database record
-                await record.update({ file_details: fileDetails });
-
-                // Double-check the update was successful
-                const verifyRecord = await DownloadVideos.findByPk(recordId);
-                const updatedFile = verifyRecord.file_details.find(f => f.name === fileName);
-
-                if (updatedFile && updatedFile.status === status) {
-                    console.log(`Successfully updated file ${fileName} status to ${status}`);
-                } else {
-                    console.error(`Failed to update file ${fileName} status to ${status}`);
-                }
-            }
-        } catch (error) {
-            console.error(`Error updating file status for ${fileName} in record ${recordId}:`, error);
-        }
-    }
-    async getDownloadStatus(student_id, batch_name, date) {
-        try {
-            const record = await DownloadVideos.findOne({
-                where: {
-                    student_id,
-                    batch_name,
-                    requested_date: date,
-                    delete_status: false
-                }
-            });
+            
             if (!record) {
-                return {
-                    status: 'not_found',
-                    message: 'No download record found'
-                };
+                throw new Error(`Record ${recordId} not found`);
             }
-            // Make sure file_details is an array
-            const fileDetails = Array.isArray(record.file_details) ? record.file_details : [];
-
-            const completedFiles = fileDetails.filter(f => f.status === 'completed').length;
-            const totalFiles = fileDetails.length;
-            const failedFiles = fileDetails.filter(f => f.status === 'failed').length;
-            const pendingFiles = fileDetails.filter(f => f.status === 'pending').length;
-            const downloadingFiles = fileDetails.filter(f => f.status === 'downloading').length;
-            return {
-                id: record.id,
-                student_id: record.student_id,
-                batch_name: record.batch_name,
-                date: record.requested_date,
-                status: record.download_status,
-                progress: {
-                    completed: completedFiles,
-                    failed: failedFiles,
-                    pending: pendingFiles,
-                    downloading: downloadingFiles,
-                    total: totalFiles,
-                    percent: totalFiles > 0 ? Math.round((completedFiles / totalFiles) * 100) : 0
-                },
-                files: fileDetails,
-                details: record.details,
-                created_at: record.createdAt,
-                updated_at: record.updatedAt
+            
+            let fileDetails = record.file_details || [];
+            fileDetails = JSON.parse(JSON.stringify(fileDetails));
+            
+            const fileIndex = fileDetails.findIndex(f => f.name === fileName);
+            if (fileIndex === -1) {
+                throw new Error(`File ${fileName} not found in record ${recordId}`);
+            }
+            
+            fileDetails[fileIndex] = {
+                ...fileDetails[fileIndex],
+                ...updates
             };
-        } catch (error) {
-            console.error('Error getting download status:', error);
-            throw error;
-        }
+            
+            await record.update({ file_details: fileDetails }, { transaction: t });
+            return fileDetails;
+        });
     }
-    async getAllDownloads(student_id, options = {}) {
-        try {
-            const where = { student_id };
-            if (options.batch_name) {
-                where.batch_name = options.batch_name;
-            }
-            if (options.status) {
-                where.download_status = options.status;
-            }
-            // By default, only show active (non-deleted) downloads
-            if (!('delete_status' in options)) {
-                where.delete_status = false;
-            } else if (options.delete_status !== null) {
-                where.delete_status = options.delete_status;
-            }
-            const records = await DownloadVideos.findAll({
-                where,
-                order: [['createdAt', 'DESC']]
+    
+    async updateOverallStatus(recordId) {
+        return await sequelize.transaction(async (t) => {
+            const record = await DownloadVideos.findByPk(recordId, {
+                transaction: t,
+                lock: t.LOCK.UPDATE
             });
-            return records.map(record => {
-                // Make sure file_details is an array
-                const fileDetails = Array.isArray(record.file_details) ? record.file_details : [];
-
-                return {
-                    id: record.id,
-                    student_id: record.student_id,
-                    batch_name: record.batch_name,
-                    date: record.requested_date,
-                    status: record.download_status,
-                    file_count: fileDetails.length,
-                    completed_count: fileDetails.filter(f => f.status === 'completed').length,
-                    pending_count: fileDetails.filter(f => f.status === 'pending').length,
-                    downloading_count: fileDetails.filter(f => f.status === 'downloading').length,
-                    failed_count: fileDetails.filter(f => f.status === 'failed').length,
-                    created_at: record.createdAt,
-                    updated_at: record.updatedAt
-                };
-            });
-        } catch (error) {
-            console.error('Error getting all downloads:', error);
-            throw error;
-        }
+            
+            if (!record) {
+                throw new Error(`Record ${recordId} not found`);
+            }
+            
+            const fileDetails = record.file_details || [];
+            
+            const completedFiles = fileDetails.filter(f => f.status === 'completed');
+            const failedFiles = fileDetails.filter(f => f.status === 'failed');
+            const pendingFiles = fileDetails.filter(f => f.status === 'pending');
+            const downloadingFiles = fileDetails.filter(f => f.status === 'downloading');
+            
+            console.log(`Record ${recordId} status check: completed=${completedFiles.length}, failed=${failedFiles.length}, pending=${pendingFiles.length}, downloading=${downloadingFiles.length}`);
+            
+            let newStatus = 'in_progress';
+            
+            if (fileDetails.length === 0) {
+                newStatus = 'failed';
+            } else if (pendingFiles.length === 0 && downloadingFiles.length === 0) {
+                if (completedFiles.length > 0) {
+                    newStatus = 'completed';
+                } else {
+                    newStatus = 'failed';
+                }
+            } else {
+                newStatus = 'in_progress';
+            }
+            
+            console.log(`Setting record ${recordId} status to ${newStatus}`);
+          
+            await record.update({
+                download_status: newStatus,
+                details: {
+                    ...record.details,
+                    updated_at: new Date(),
+                    success_count: completedFiles.length,
+                    failed_count: failedFiles.length,
+                    pending_count: pendingFiles.length,
+                    downloading_count: downloadingFiles.length,
+                    total_count: fileDetails.length
+                }
+            }, { transaction: t });
+            
+            console.log(`Updated record ${recordId} status to ${newStatus}`);
+            return newStatus;
+        });
     }
 }
-// Create API route controllers
+
+
 const getVideoFilesRoute = async (req, res) => {
     try {
         const { student_id, batch_name, date } = req.body;
@@ -823,10 +776,13 @@ const getVideoFilesRoute = async (req, res) => {
                 error: 'Missing required parameters: student_id, batch_name, and date are required'
             });
         }
+        
         const videoManager = new EnhancedVideoFileManager(
             "/home/techreactive/var/www/html/videos",
-            "/home/recorded-class-backend/public/videos/downloaded_videos/"
+            "/home/recorded-class-backend/public/videos/downloaded_videos/",
+            "/var/www/html/node_recorder/videos/",
         );
+        
         const result = await videoManager.downloadVideoForStudent(student_id, batch_name, date);
         res.json(result);
     } catch (error) {
@@ -837,6 +793,7 @@ const getVideoFilesRoute = async (req, res) => {
         });
     }
 };
+
 const getDownloadStatusRoute = async (req, res) => {
     try {
         const { student_id, batch_name, date } = req.query;
@@ -846,10 +803,13 @@ const getDownloadStatusRoute = async (req, res) => {
                 error: 'Missing required parameters: student_id, batch_name, and date are required'
             });
         }
+        
         const videoManager = new EnhancedVideoFileManager(
             "/home/techreactive/var/www/html/videos/",
-            "/home/recorded-class-backend/public/videos/downloaded_videos/"
+            "/home/recorded-class-backend/public/videos/downloaded_videos/",
+            "/var/www/html/node_recorder/videos/",
         );
+        
         const result = await videoManager.getDownloadStatus(student_id, batch_name, date);
         res.json(result);
     } catch (error) {
@@ -860,10 +820,9 @@ const getDownloadStatusRoute = async (req, res) => {
         });
     }
 };
-// const getAllDown
+
 module.exports = {
     EnhancedVideoFileManager,
     getVideoFilesRoute,
     getDownloadStatusRoute,
-    // getAllDownloadsRoute
 };
