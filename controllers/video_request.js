@@ -229,7 +229,7 @@ const video_request_approve = async (req, res) => {
 // get requested list for admin 
 const getRequests = async (req, res) => {
   try {
-    // Get 'page', 'limit', and 'student_id' from query parameters
+    // Get query parameters
     const { id, search_key, approved, contact } = req.query;
     const student_id = parseInt(req.query.st_id);
     const page = parseInt(req.query.page) || 1;
@@ -238,107 +238,143 @@ const getRequests = async (req, res) => {
 
     console.log("Student ID:", parseInt(student_id), "id:", id, "Page:", page, "Limit:", limit, "Offset:", offset, "contact", contact);
 
-    // Query to fetch records with WHERE condition, LIMIT, and OFFSET
-    let recordsQuery = `
-      SELECT * FROM absent_records
-      WHERE 1=1
-    `;
-
-    // Add WHERE clause if student_id is provided
+    // Base query with common conditions
+    let baseConditions = `FROM absent_records WHERE 1=1`;
     const replacements = { limit, offset };
 
     if (student_id) {
-      recordsQuery += ` AND student_id = :student_id`;
+      baseConditions += ` AND student_id = :student_id`;
       replacements.student_id = student_id;
     }
     if (contact) {
-      recordsQuery += ` AND EXISTS (
+      baseConditions += ` AND EXISTS (
         SELECT 1 
         FROM jsonb_array_elements(student_details->'contact') AS contacts
         WHERE contacts->>'number' = :contact) `;
       replacements.contact = contact;
     }
     if (parseInt(id)) {
-      recordsQuery += ` AND id = :id`;
+      baseConditions += ` AND id = :id`;
       replacements.id = parseInt(id);
     }
     if (approved) {
       if (approved === '3') {
-        recordsQuery += ` AND approved_status = false AND is_inactive = false`;
+        baseConditions += ` AND approved_status = false AND is_inactive = false`;
       } else if (approved === '0') {
-        recordsQuery += ` AND approved_status = false AND is_inactive = true`;
+        baseConditions += ` AND approved_status = false AND is_inactive = true`;
       } else if (approved === '1') {
-        recordsQuery += ` AND approved_status = true AND is_inactive = true`;
+        baseConditions += ` AND approved_status = true AND is_inactive = true`;
       }
     }
     if (search_key) {
-      recordsQuery += ` AND batch_name ILIKE :search_key`;
+      baseConditions += ` AND batch_name ILIKE :search_key`;
       replacements.search_key = `%${search_key}%`;
     }
 
-    recordsQuery += ` ORDER BY is_inactive,"createdAt" desc LIMIT :limit OFFSET :offset`;
-
+    // Query to fetch records
+    let recordsQuery = `SELECT * ${baseConditions} ORDER BY is_inactive,"createdAt" desc LIMIT :limit OFFSET :offset`;
     const records = await sequelize.query(recordsQuery, {
       replacements,
       type: sequelize.QueryTypes.SELECT,
     });
 
-    // Query to get the total count of records with WHERE condition
-    let countQuery = `SELECT COUNT(*) AS count FROM absent_records WHERE 1=1`;
-    if (contact) {
-      countQuery += ` AND EXISTS (
-        SELECT 1 
-        FROM jsonb_array_elements(student_details->'contact') AS contacts
-        WHERE contacts->>'number' = :contact) `;
-    }
-    if (student_id) {
-      countQuery += ` AND student_id = :student_id`;
-    }
-    if (parseInt(id)) {
-      countQuery += ` AND id = :id`;
-    }
-    // approved 1 , rejected -0 pending -3
-    if (approved) {
-      if (approved === '3') {
-        countQuery += ` AND approved_status = false AND is_inactive = false`;
-      } else if (approved === '0') {
-        countQuery += ` AND approved_status = false AND is_inactive = true`;
-      } else if (approved === '1') {
-        countQuery += ` AND approved_status = true AND is_inactive = true`;
-      }
-    }
-    if (search_key) {
-      countQuery += ` AND batch_name ILIKE '%${search_key}%' `;
-    }
+    // Query to get the total count of records
+    let countQuery = `SELECT COUNT(*) AS count ${baseConditions}`;
     const [countResult] = await sequelize.query(countQuery, {
-      replacements: { student_id, id, approved, search_key, contact },
+      replacements,
       type: sequelize.QueryTypes.SELECT,
     });
-
     const totalRecords = parseInt(countResult.count);
     const totalPages = Math.ceil(totalRecords / limit);
 
-    // For each record, check the DownloadVideos table
+    // For each record, check the counts with the same filters
     const recordsWithDownloadCount = await Promise.all(
       records.map(async (record) => {
+        // Include the same contact filter in all count queries
+        const contactCondition = contact ? ` AND EXISTS (
+          SELECT 1 
+          FROM jsonb_array_elements(student_details->'contact') AS contacts
+          WHERE contacts->>'number' = :contact) ` : '';
+        
         const downloadCountQuery = `
           SELECT COUNT(*) AS download_count
-          FROM download_videos
+          FROM absent_records
           WHERE batch_name = :batch_name
             AND student_id = :student_id
             AND requested_date = :requested_date
+            AND is_inactive = true
+            ${contactCondition}
         `;
-        const [downloadCountResult] = await sequelize.query(downloadCountQuery, {
-          replacements: {
-            batch_name: record.batch_name,
-            student_id: record.student_id,
-            requested_date: record.requested_date,
-          },
-          type: sequelize.QueryTypes.SELECT,
-        });
+        
+        const batchReqCountQuery = `
+          SELECT COUNT(*) AS batch_req_count
+          FROM absent_records
+          WHERE batch_name = :batch_name
+            AND student_id = :student_id
+            AND is_inactive = true
+            ${contactCondition}
+        `;
+        
+        const batchReqAppCountQuery = `
+          SELECT COUNT(*) AS batch_req_count
+          FROM absent_records
+          WHERE batch_name = :batch_name
+            AND student_id = :student_id
+            AND is_inactive = true 
+            AND approved_status = true
+            ${contactCondition}
+        `;
+        
+        const batchReqRejCountQuery = `
+          SELECT COUNT(*) AS batch_req_count
+          FROM absent_records
+          WHERE batch_name = :batch_name
+            AND student_id = :student_id
+            AND is_inactive = true 
+            AND approved_status = false
+            ${contactCondition}
+        `;
+        
+        const queryReplacements = {
+          batch_name: record.batch_name,
+          student_id: record.student_id,
+          requested_date: record.requested_date,
+        };
+        
+        if (contact) {
+          queryReplacements.contact = contact;
+        }
+
+        const [
+          downloadCountResult,
+          batchReqCountResult,
+          batchReqAppCountResult,
+          batchReqRejCountResult
+        ] = await Promise.all([
+          sequelize.query(downloadCountQuery, {
+            replacements: queryReplacements,
+            type: sequelize.QueryTypes.SELECT,
+          }),
+          sequelize.query(batchReqCountQuery, {
+            replacements: queryReplacements,
+            type: sequelize.QueryTypes.SELECT,
+          }),
+          sequelize.query(batchReqAppCountQuery, {
+            replacements: queryReplacements,
+            type: sequelize.QueryTypes.SELECT,
+          }),
+          sequelize.query(batchReqRejCountQuery, {
+            replacements: queryReplacements,
+            type: sequelize.QueryTypes.SELECT,
+          })
+        ]);
+
         return {
           ...record,
-          download_count: parseInt(downloadCountResult.download_count),
+          download_count: parseInt(downloadCountResult[0].download_count),
+          batch_req_count: parseInt(batchReqCountResult[0].batch_req_count),
+          batch_req_app_count: parseInt(batchReqAppCountResult[0].batch_req_count),
+          batch_req_rej_count: parseInt(batchReqRejCountResult[0].batch_req_count),
         };
       })
     );

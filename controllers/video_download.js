@@ -7,7 +7,7 @@ const moment = require('moment');
 const sequelize = require("../config/db"); 
 const { connectSFTP, serverAConfig, recordServerConfig } = require('../helpers/video_downloads');
 const DownloadVideos = require('../models/download_videos');
-
+const { Op } = require('sequelize');
 class InMemoryQueue {
     constructor() {
         this.queue = [];
@@ -276,7 +276,8 @@ class EnhancedVideoFileManager {
                                     student_id,
                                     batch_name: batchName,
                                     requested_date: formattedDate,
-                                    delete_status: false
+                                    delete_status: false,
+                                    download_status: { [Op.ne]: 'failed' } 
                                 },
                                 transaction: t,
                                 lock: t.LOCK.UPDATE // Use row-level locking
@@ -528,8 +529,14 @@ class EnhancedVideoFileManager {
                                 console.log(`Starting download process for ${pendingFiles.length} pending files`);
                                 // Use a separate function to avoid waiting for the entire process
                                 // Start this AFTER the transaction completes
+                                let server 
+                                if(newFiles.length > 0){
+                                    server = 'ServerA'
+                                }else if(newFiles2.length > 0){
+                                    server = 'ServerMain'
+                                }
                                 setImmediate(() => {
-                                    this.processDownload(downloadRecord.id, batchName, date, fileDetails, recordKey)
+                                    this.processDownload(downloadRecord.id, batchName, date, fileDetails, recordKey,server)
                                         .catch(err => {
                                             console.error(`Error in background download process for ${recordKey}:`, err);
                                         });
@@ -574,7 +581,7 @@ class EnhancedVideoFileManager {
         return results;
     }
 
-    async processDownload(recordId, batchName, date, fileDetails, recordKey) {
+    async processDownload(recordId, batchName, date, fileDetails, recordKey, server) {
         try {
             console.log(`Starting background download process for record ${recordId}`);
             const pendingFiles = fileDetails.filter(f => f.status === 'pending');
@@ -591,9 +598,20 @@ class EnhancedVideoFileManager {
             
             // Make sure directory exists
             await fs.promises.mkdir(studentDownloadDir, { recursive: true });
-            
+            let serverConfig 
+            // if( server == 'ServerA'){
+            //     serverConfig = serverAConfig 
+            //     this.remoteDir
+            // }else 
+            if (server == 'ServerMain'){
+                this.remoteDir = this.recordDir
+                serverConfig = recordServerConfig
+            }else{
+                serverConfig = serverAConfig 
+                this.remoteDir
+            }
             // Establish SFTP connection
-            const sftpA = await connectSFTP(serverAConfig, "Server A");
+            const sftpA = await connectSFTP(serverConfig, "Server A");
             const batchRemoteDir = path.join(String(this.remoteDir), String(batchName));
             
             try {

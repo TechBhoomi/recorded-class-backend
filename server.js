@@ -5,7 +5,7 @@ const path = require("path");
 const cors = require('cors');
 require('dotenv').config();
 require('./helpers/cron-init');
-
+const { setupRetryFailedDownloadsCron } = require('./helpers/failed_downloads_cron');
 
 
 const app = express();
@@ -126,6 +126,7 @@ const server = app.listen(PORT, () => {
   console.log(`server running on port ` + PORT);
 });
 server.setTimeout(10 * 60 * 1000);
+setupRetryFailedDownloadsCron();
 // app.listen(PORT, () => {
 //     console.log(`server running on port ` + PORT);
 // });
