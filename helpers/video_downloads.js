@@ -23,9 +23,9 @@ const serverAConfig = {
   readyTimeout: 600000
 };
 const serverBConfig = {
-  host: "106.51.80.18",
+  host: "85.195.83.145",
   user: "root",
-  password: "legend@123",
+  password: "Reactive@54321Tech",
   port: 8787,
 };
 const recordServerDir = "/var/www/html/node_recorder/videos";

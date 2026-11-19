@@ -69,6 +69,11 @@ const AbsentRecord = sequelize.define("AbsentRecord", {
         //     notEmpty: true,
         // },
     },
+     _q : {
+        type: DataTypes.BOOLEAN, 
+        defaultValue: false, 
+        allowNull: false,
+    },
 }, {
     tableName: "absent_records",
     timestamps: true, // Adds `createdAt` and `updatedAt`

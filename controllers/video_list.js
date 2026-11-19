@@ -6,6 +6,7 @@ const AbsentRecord = require("../models/absent_records");
 const { transferFiles } = require("../helpers/video_downloads");
 // const { backgroundFileCheck } = require("../helpers/clear_files");
 // const { checkAndCleanupFiles } = require("../helpers/file_clean_up");
+// const CURRENT_DATE = moment('2025-03-08');
 class VideoManagementSystem {
     constructor(remoteDir, localDir) {
         this.remoteDir = remoteDir;
@@ -72,8 +73,13 @@ class VideoManagementSystem {
     }
 
     // Main function to get and process dates
-    async getVideoDates(studentId, batchName, absentDates) {
+     async getVideoDates(studentId, batchName, absentDates, extend = false,) {
         try {
+              if(extend){
+                // const resultArr = this.filterValidDates(absentDates);
+                // console.log(resultArr,"resultArr111");
+                return absentDates;
+            }
             const thirtyDaysAgo = moment().subtract(7, 'days').startOf('day');
 
             // Get approved requests from database
@@ -119,6 +125,13 @@ class VideoManagementSystem {
 const getVideoRoute = async (req, res) => {
     try {
         const { student_id, batch_name, absent_date } = req.body;
+          const extend =
+      typeof req.body.extend === 'boolean'
+        ? req.body.extend
+        : req.body.extend === 'true'; // handles string "true"
+    // const edu_rc =  typeof req.body.edu_rc === 'boolean'
+    //     ? req.body.edu_rc
+    //     : req.body.edu_rc === 'true';
         const payload = req.body
         const videoManager = new VideoManagementSystem(
             "/home/techreactive/var/www/html/videos/",
@@ -128,7 +141,7 @@ const getVideoRoute = async (req, res) => {
         const dates = await videoManager.getVideoDates(
             student_id,
             batch_name,
-            absent_date
+            absent_date,extend
         );
         // backgroundFileCheck(payload)
         //         .then(result => {

@@ -6,6 +6,7 @@ const { video_request, video_request_approve, getRequests } = require('../contro
 const { getVideoRoute } = require('../controllers/video_list');
 const { getVideoFilesRoute, getDownloadStatusRoute } = require('../controllers/video_download')
 const { runRetryFailedDownloadsManually } = require('../helpers/failed_downloads_cron');
+const {runManualCleanup} = require('../helpers/cron')
 const router = express.Router();
 router.get("/home", test);
 
@@ -19,8 +20,6 @@ router.get("/stream_video", stream2);
 router.post('/get-videos', getVideoRoute);
 router.post('/get-video-files', getVideoFilesRoute);
 router.get('/get-video-status', getDownloadStatusRoute);
-// const { runManualCleanup } = require('../helpers/cron');
-
 // // Run a manual cleanup 
 router.post('/clean_up', async (req, res) => {
     try {

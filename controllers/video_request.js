@@ -12,6 +12,10 @@ const { fetchVideoDetails_RecordServer } = require("../helpers/video_downloads")
 const video_request = async (req, res) => {
   try {
     const { student_id, batch_name, requested_date, active_videos, comment, name, contact, email } = req.body;
+     const _q =
+      typeof req.body._q === 'boolean'
+        ? req.body._q
+        : req.body._q === 'true'; 
     let active_video_dates = active_videos
     if (!student_id || !batch_name || !requested_date || !active_video_dates) {
       return res.status(400).json({ error: "Missing required fields." });
@@ -33,13 +37,11 @@ const video_request = async (req, res) => {
       where: { student_id, batch_name, requested_date,approved_status:true },
     });
     // 
-    console.log(existingRecordCount,"existingRecordCount");
     
     const videoRootDirectory = process.env.VIDEO_PATH2;
-    console.log(videoRootDirectory, "videoRootDirectory");
 
     const videoDirPath = path.resolve(videoRootDirectory, batch_name);
-    console.log(videoDirPath, "videoDirPath");
+
     try {
       await fs.promises.access(videoDirPath, fs.constants.R_OK);
     } catch (err) {
@@ -79,7 +81,8 @@ const video_request = async (req, res) => {
         requested_date,
         video_details: video_details,
         student_details,
-        comment
+        comment,
+          _q: typeof _q !== 'undefined' ? _q : false 
       });
 
       res.status(200).json({
@@ -87,16 +90,13 @@ const video_request = async (req, res) => {
         record: newRecord,
       });
       const result = await AbsentDateValidation(arr_absentDate, student_id, batch_name, files);
-      console.log(result,"result");
+
 
       if (result[requested_date].length === 0) {
-        console.log("Object is empty");
         // approved_status = false;
         const { files: downloadedFiles , unavailableFiles: unavailableDate , error } = await fetchVideoDetails_RecordServer(batch_name, requested_date);
         
-        console.log(downloadedFiles, unavailableDate,"fetchVideoDetails_RecordServersfsdjfsdfsdfsjkgfkh");
         // result[requested_date] = downloadedFiles
-        console.log(downloadedFiles.length === 0,"downloadedFiles.length === 0");
         
         if(downloadedFiles.length === 0 ){
           const newDetails = {
@@ -178,7 +178,6 @@ const video_request_approve = async (req, res) => {
           };
           if (approved_status === true) {
 
-            console.log(record.video_details.active_video_dates);
 
             const oldData = [...record.video_details.active_video_dates];
             record.video_details.active_video_dates.push(record.video_details.requested_video_date);
@@ -189,7 +188,6 @@ const video_request_approve = async (req, res) => {
               requested_video_date: record.video_details.requested_video_date,
               updated_dates: newData
             }
-            console.log(updatedVideoDetails, "updatedVideoDetails");
 
             record.video_details = updatedVideoDetails
 
@@ -232,6 +230,7 @@ const getRequests = async (req, res) => {
     // Get query parameters
     const { id, search_key, approved, contact } = req.query;
     const student_id = parseInt(req.query.st_id);
+   const _q = req.query._q === 'true' ? true : req.query._q === 'false' ? false : null;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
@@ -270,7 +269,10 @@ const getRequests = async (req, res) => {
       baseConditions += ` AND batch_name ILIKE :search_key`;
       replacements.search_key = `%${search_key}%`;
     }
-
+ if (_q !== null) {
+      baseConditions += ` AND _q = :_q`;
+      replacements._q = _q;
+    }
     // Query to fetch records
     let recordsQuery = `SELECT * ${baseConditions} ORDER BY is_inactive,"createdAt" desc LIMIT :limit OFFSET :offset`;
     const records = await sequelize.query(recordsQuery, {
@@ -291,11 +293,11 @@ const getRequests = async (req, res) => {
     const recordsWithDownloadCount = await Promise.all(
       records.map(async (record) => {
         // Include the same contact filter in all count queries
-        const contactCondition = contact ? ` AND EXISTS (
+ const contactCondition = contact ? ` AND EXISTS (
           SELECT 1 
           FROM jsonb_array_elements(student_details->'contact') AS contacts
           WHERE contacts->>'number' = :contact) ` : '';
-        
+         const isPentagonCondition = _q !== null ? ` AND _q = :_q` : '';
         const downloadCountQuery = `
           SELECT COUNT(*) AS download_count
           FROM absent_records
@@ -304,6 +306,7 @@ const getRequests = async (req, res) => {
             AND requested_date = :requested_date
             AND is_inactive = true
             ${contactCondition}
+             ${isPentagonCondition}
         `;
         
         const batchReqCountQuery = `
@@ -313,6 +316,7 @@ const getRequests = async (req, res) => {
             AND student_id = :student_id
             AND is_inactive = true
             ${contactCondition}
+             ${isPentagonCondition}
         `;
         
         const batchReqAppCountQuery = `
@@ -323,9 +327,10 @@ const getRequests = async (req, res) => {
             AND is_inactive = true 
             AND approved_status = true
             ${contactCondition}
+             ${isPentagonCondition}
         `;
         
-        const batchReqRejCountQuery = `
+      const batchReqRejCountQuery = `
           SELECT COUNT(*) AS batch_req_count
           FROM absent_records
           WHERE batch_name = :batch_name
@@ -333,6 +338,7 @@ const getRequests = async (req, res) => {
             AND is_inactive = true 
             AND approved_status = false
             ${contactCondition}
+             ${isPentagonCondition}
         `;
         
         const queryReplacements = {
@@ -344,13 +350,13 @@ const getRequests = async (req, res) => {
         if (contact) {
           queryReplacements.contact = contact;
         }
-
+  if (_q !== null) queryReplacements._q = _q;
         const [
           downloadCountResult,
           batchReqCountResult,
           batchReqAppCountResult,
           batchReqRejCountResult
-        ] = await Promise.all([
+        ]  = await Promise.all([
           sequelize.query(downloadCountQuery, {
             replacements: queryReplacements,
             type: sequelize.QueryTypes.SELECT,

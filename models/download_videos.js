@@ -49,6 +49,7 @@ const DownloadVideos = sequelize.define("DownloadVideos", {
         allowNull: false,
         defaultValue: [],
     },
+    
 }, {
     tableName: "download_videos",
     timestamps: true, // Adds `createdAt` and `updatedAt`

@@ -149,7 +149,7 @@ class EnhancedVideoFileManager {
             const batchRemoteDir = path.join(String(this.recordDir), String(batchName));
             sftpA = await connectSFTP(recordServerConfig, "Server A");
 
-            console.log(`Checking remote directory: ${batchRemoteDir}`);
+            // console.log(`Checking remote directory: ${batchRemoteDir}`);
 
             try {
                 const dirExists = await sftpA.exists(batchRemoteDir);
@@ -163,7 +163,7 @@ class EnhancedVideoFileManager {
             }
 
             const files = await sftpA.list(batchRemoteDir);
-            console.log(`Found ${files.length} files in remote directory`);
+            // console.log(`Found ${files.length} files in remote directory`);
 
             const dateFiles = files.filter(file => {
                 const matches = file.name.includes(date) &&
@@ -175,7 +175,7 @@ class EnhancedVideoFileManager {
                 return matches;
             });
 
-            console.log(`Found ${dateFiles.length} files matching date ${date}`);
+            // console.log(`Found ${dateFiles.length} files matching date ${date}`);
             return {
                 exists: dateFiles.length > 0,
                 files: dateFiles
@@ -199,7 +199,7 @@ class EnhancedVideoFileManager {
             const batchRemoteDir = path.join(String(this.remoteDir), String(batchName));
             sftpA = await connectSFTP(serverAConfig, "Server A");
 
-            console.log(`Checking remote directory: ${batchRemoteDir}`);
+            // console.log(`Checking remote directory: ${batchRemoteDir}`);
 
             try {
                 const dirExists = await sftpA.exists(batchRemoteDir);
@@ -213,19 +213,19 @@ class EnhancedVideoFileManager {
             }
 
             const files = await sftpA.list(batchRemoteDir);
-            console.log(`Found ${files.length} files in remote directory`);
+            // console.log(`Found ${files.length} files in remote directory`);
 
             const dateFiles = files.filter(file => {
                 const matches = file.name.includes(date) &&
                     (file.name.endsWith('.webm') || file.name.endsWith('.mp4'));
 
                 if (matches) {
-                    console.log(`Found matching file: ${file.name}`);
+                    // console.log(`Found matching file: ${file.name}`);
                 }
                 return matches;
             });
 
-            console.log(`Found ${dateFiles.length} files matching date ${date}`);
+            // console.log(`Found ${dateFiles.length} files matching date ${date}`);
             return {
                 exists: dateFiles.length > 0,
                 files: dateFiles
@@ -243,11 +243,12 @@ class EnhancedVideoFileManager {
         }
     }
 
-    async downloadVideoForStudent(student_id, batchName, dates) {
+    async downloadVideoForStudent(student_id, batchName, dates,extend = false,_isQ=false) {
+        // console.log(`Initiating download for student ${student_id}`,  "extended_rcccccc:", extended_rc,"_isQ:",_isQ);
         if (!Array.isArray(dates)) {
             dates = [dates];
         }
-    
+        
         const results = [];
         const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000; 
     
@@ -255,7 +256,7 @@ class EnhancedVideoFileManager {
             try {
                 const requestedDate = new Date(date);
                 const formattedDate = requestedDate.toISOString().split('T')[0] + ' 00:00:00+00';
-                console.log(formattedDate);
+                // console.log(formattedDate);
     
                 const recordKey = `${student_id}_${batchName}_${date}`;
                 
@@ -280,11 +281,11 @@ class EnhancedVideoFileManager {
                                     download_status: { [Op.ne]: 'failed' } 
                                 },
                                 transaction: t,
-                                lock: t.LOCK.UPDATE // Use row-level locking
+                                lock: t.LOCK.UPDATE 
                             });
                             
                             if (existingRecord) {
-                                console.log(`Found existing active record ${existingRecord.id} for ${recordKey}`);
+                                // console.log(`Found existing active record ${existingRecord.id} for ${recordKey}`);
                 
                                 if (existingRecord.download_status === 'in_progress' || existingRecord.download_status === 'pending') {
                                     let fileDetails = existingRecord.file_details || [];
@@ -323,19 +324,65 @@ class EnhancedVideoFileManager {
                 
                                 downloadRecord = existingRecord;
                             } else {
-                                // Create new record if none exists - now with transaction
-                                downloadRecord = await DownloadVideos.create({
-                                    student_id,
-                                    type: 'video',
-                                    batch_name: batchName,
-                                    requested_date: date,
-                                    download_status: 'pending',
-                                    delete_status: false,
-                                    active_upto: moment().add(7, 'days').toDate(),
-                                    file_details: [],
-                                    details: {}
-                                }, { transaction: t });
-                                console.log(`Created new record ${downloadRecord.id} for ${recordKey}`);
+                                if(_isQ == true){
+                                    console.log(`isQ true hitted`);
+                                    downloadRecord = await DownloadVideos.create({
+                                        student_id,
+                                        type: 'video',
+                                        batch_name: batchName,
+                                        requested_date: date,
+                                        download_status: 'pending',
+                                        delete_status: false,
+                                        active_upto: moment().add(60, 'days').toDate(),
+                                        file_details: [],
+                                        details: {}
+                                    }, { transaction: t });
+                                }else{
+                                // if(extended_rc == true){
+                                //     // Create new record if none exists - now with transaction
+                                //     downloadRecord = await DownloadVideos.create({
+                                //         student_id,
+                                //         type: 'video',
+                                //         batch_name: batchName,
+                                //         requested_date: date,
+                                //         download_status: 'pending',
+                                //         delete_status: false,
+                                //         active_upto: moment().add(365, 'days').toDate(),
+                                //         file_details: [],
+                                //         details: {}
+                                //     }, { transaction: t });
+                                // }else if(edu_rc == true){
+                                //     // Create new record if none exists - now with transaction
+                                //     downloadRecord = await DownloadVideos.create({
+                                //         student_id,
+                                //         type: 'video',
+                                //         batch_name: batchName,
+                                //         requested_date: date,
+                                //         download_status: 'pending',
+                                //         delete_status: false,
+                                //         active_upto: moment().add(182, 'days').toDate(),
+                                //         file_details: [],
+                                //         details: {}
+                                //     }, { transaction: t });
+                                // }
+                                // else{
+
+                                    // Create new record if none exists - now with transaction
+                                    downloadRecord = await DownloadVideos.create({
+                                        student_id,
+                                        type: 'video',
+                                        batch_name: batchName,
+                                        requested_date: date,
+                                        download_status: 'pending',
+                                        delete_status: false,
+                                        active_upto: moment().add(7, 'days').toDate(),
+                                        file_details: [],
+                                        details: {}
+                                    }, { transaction: t });
+                                    // console.log(`Created new record ${downloadRecord.id} for ${recordKey}`);
+                                // }
+                                }
+                               
                             }
                 
                             if (downloadRecord.download_status === 'completed') {
@@ -347,7 +394,7 @@ class EnhancedVideoFileManager {
                                 };
                             }
                 
-                            // Rest of the implementation remains largely the same
+                            // Rest of the implementation remains the same
                             const remoteCheck = await this.checkFilesExistRemotely(batchName, date);
                             const remoteMainCheck = await this.checkFilesExistRemotelyMain(batchName, date);
                             if (!remoteCheck.exists && !remoteMainCheck) {
@@ -389,7 +436,7 @@ class EnhancedVideoFileManager {
                                         // If file exists with similar size, consider it downloaded
                                         if (stats.size > 0 && Math.abs(stats.size - this.getFileSize(file)) < 1024) {
                                             fileExists = true;
-                                            console.log(`File ${file.name} already exists locally with correct size`);
+                                            // console.log(`File ${file.name} already exists locally with correct size`);
                                             
                                             // Get video duration if it's a video file
                                             let duration = "00:00:00";
@@ -443,7 +490,7 @@ class EnhancedVideoFileManager {
                                         // If file exists with similar size, consider it downloaded
                                         if (stats.size > 0 && Math.abs(stats.size - this.getFileSize(file)) < 1024) {
                                             fileExists = true;
-                                            console.log(`File ${file.name} already exists locally with correct size`);
+                                            // console.log(`File ${file.name} already exists locally with correct size`);
                                             
                                             // Get video duration if it's a video file
                                             let duration = "00:00:00";
@@ -470,7 +517,7 @@ class EnhancedVideoFileManager {
                                         // File doesn't exist, will be added to download queue
                                         fileExists = false;
                                     }
-                                    console.log(fileExists,"fileExists");
+                                    // console.log(fileExists,"fileExists");
                                     
                                     // Only add to pending if file doesn't exist locally
                                     if (!fileExists) {
@@ -549,7 +596,7 @@ class EnhancedVideoFileManager {
                                             console.error(`Error updating status for ${recordKey}:`, err);
                                         });
                                 });
-                                console.log(`No pending files to download, scheduled status update for record ${downloadRecord.id}`);
+                                // console.log(`No pending files to download, scheduled status update for record ${downloadRecord.id}`);
                             }
                             return {
                                 date,
@@ -599,10 +646,6 @@ class EnhancedVideoFileManager {
             // Make sure directory exists
             await fs.promises.mkdir(studentDownloadDir, { recursive: true });
             let serverConfig 
-            // if( server == 'ServerA'){
-            //     serverConfig = serverAConfig 
-            //     this.remoteDir
-            // }else 
             if (server == 'ServerMain'){
                 this.remoteDir = this.recordDir
                 serverConfig = recordServerConfig
@@ -788,6 +831,18 @@ class EnhancedVideoFileManager {
 const getVideoFilesRoute = async (req, res) => {
     try {
         const { student_id, batch_name, date } = req.body;
+         // Normalize optional boolean
+    const extend =
+      typeof req.body.extend === 'boolean'
+        ? req.body.extend
+        : req.body.extend === 'true'; // handles string "true"
+    // const edu_rc =  typeof req.body.edu_rc === 'boolean'
+    //     ? req.body.edu_rc
+    //     : req.body.edu_rc === 'true';
+            const _isQ =
+      typeof req.body._isQ === 'boolean'
+        ? req.body._isQ
+        : req.body._isQ === 'true'; // handles string "true"
         if (!student_id || !batch_name || !date) {
             return res.status(400).json({
                 success: false,
@@ -801,7 +856,7 @@ const getVideoFilesRoute = async (req, res) => {
             "/var/www/html/node_recorder/videos/",
         );
         
-        const result = await videoManager.downloadVideoForStudent(student_id, batch_name, date);
+         const result = await videoManager.downloadVideoForStudent(student_id, batch_name, date,extend,_isQ);
         res.json(result);
     } catch (error) {
         console.error('Error in downloadVideosRoute:', error);

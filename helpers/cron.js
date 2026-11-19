@@ -1,8 +1,10 @@
 const fs = require('fs-extra');
+const { exec } = require('child_process');
 const path = require('path');
 const moment = require('moment');
 const { Sequelize, Op } = require('sequelize');
 const cron = require('node-cron');
+// const activeStreams = require('../controllers/stream');
 
 // Import the DownloadVideos model
 const  DownloadVideos  = require('../models/download_videos');
@@ -107,8 +109,17 @@ class DownloadedVideosCleanup {
                     const filePath = path.join(this.localDir, batchName, fileName);
                     try {
                         if (await fs.pathExists(filePath)) {
-                            await fs.unlink(filePath);
-                            console.log(`Deleted file: ${filePath}`);
+                           await new Promise((resolve, reject) => {
+                            exec(`rm -f "${filePath}"`, (error, stdout, stderr) => {
+                                if (error) {
+                                    console.error(`Error deleting file ${filePath} using rm:`, stderr);
+                                    reject(error);
+                                } else {
+                                    console.log(`Deleted file using rm: ${filePath}`);
+                                    resolve();
+                                }
+                            });
+                        });
                         } else {
                             console.log(`File already removed or not found: ${filePath}`);
                         }

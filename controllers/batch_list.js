@@ -18,7 +18,7 @@ const stream2 = async (req, res) => {
         }
 
         const videoSize = fs.statSync(videoPath).size;
-        console.log(videoSize, "Video size:", videoPath);
+        // console.log(videoSize, "Video size:", videoPath);
 
         const CHUNK_SIZE = 10 ** 7;
         const bytesPrefix = "bytes=";
@@ -51,7 +51,7 @@ const stream2 = async (req, res) => {
 const videoList = async (req, res) => {
     try {
         let files = [];
-        console.log("Request Params:", req.query);
+        // console.log("Request Params:", req.query);
         let dir = `/home/recorded-class-backend/public/videos/downloaded_videos/${req.query.batch}`;
         const fileList = fs.readdirSync(dir);
 
